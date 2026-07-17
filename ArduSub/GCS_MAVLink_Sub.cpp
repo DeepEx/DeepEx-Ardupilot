@@ -4,6 +4,8 @@
 #include <AP_RPM/AP_RPM_config.h>
 #include <AP_RangeFinder/AP_RangeFinder.h>
 #include <AP_RangeFinder/AP_RangeFinder_Backend.h>
+#include <AP_CANManager/AP_CANManager.h>
+#include <AP_VESC/AP_VESC.h>
 
 MAV_TYPE GCS_Sub::frame_type() const
 {
@@ -190,6 +192,29 @@ bool GCS_MAVLINK_Sub::send_info()
 
     CHECK_PAYLOAD_SIZE(NAMED_VALUE_FLOAT);
     send_named_float("RFTarget", sub.mode_surftrak.get_rangefinder_target_cm() * 0.01f);
+
+#if AP_VESC_ENABLED
+    for (uint8_t i = 0; i < AP::can().get_num_drivers(); i++) {
+        AP_VESC *vesc = AP_VESC::get_vesc(i);
+        if (vesc == nullptr) {
+            continue;
+        }
+
+        const uint16_t expected = vesc->expected_mask();
+        const uint16_t present = vesc->present_mask();
+        CHECK_PAYLOAD_SIZE(NAMED_VALUE_INT);
+        send_named_int("VESC_STATE", int32_t(vesc->readiness_state()));
+        CHECK_PAYLOAD_SIZE(NAMED_VALUE_INT);
+        send_named_int("VESC_EXP", expected);
+        CHECK_PAYLOAD_SIZE(NAMED_VALUE_INT);
+        send_named_int("VESC_PRES", present);
+        CHECK_PAYLOAD_SIZE(NAMED_VALUE_INT);
+        send_named_int("VESC_MISS", expected & ~present);
+        CHECK_PAYLOAD_SIZE(NAMED_VALUE_INT);
+        send_named_int("VESC_SAFE", vesc->zero_flush_complete() ? 1 : 0);
+        break;
+    }
+#endif
 
     return true;
 }
