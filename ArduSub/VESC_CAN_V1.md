@@ -1,6 +1,6 @@
 # ArduSub VESC CAN integration v1
 
-Status: production-oriented implementation requiring hardware bench validation
+Status: implementation candidate requiring hardware bench validation
 
 Target: ArduSub on Raspberry Pi 5 with Blue Robotics Navigator and a native
 Linux SocketCAN USB-CAN adapter.
@@ -36,7 +36,7 @@ changing the parameter, and rebooting. Disarm, emergency stop, stale mixer
 commands, stale required telemetry, an active fault, interface-down state, and
 recent TX failure all cause zero-eRPM commands in CAN mode.
 
-On disarm, zero commands are sent for `CAN_D1_VE_STOP_MS`. `VESC_SAFE=1` means
+On disarm, zero commands are sent for `CAN_D1_VE_STOPMS`. `VESC_SAFE=1` means
 that this flush has completed; VMOT must not be removed before then. The
 VESC-side command timeout remains an independent safety requirement.
 
@@ -58,10 +58,9 @@ Set `CAN_D1_PROTOCOL=15` for VESC and associate `CAN_P1_DRIVER=1`.
 | `CAN_D1_VE_CMD_TO` | `100` | Mixer command timeout in ms |
 | `CAN_D1_VE_TLM_TO` | `500` | STATUS_1 freshness limit in ms |
 | `CAN_D1_VE_EXT_TO` | `1000` | STATUS_4 and STATUS_5 limit in ms |
-| `CAN_D1_VE_ENRG_TO` | `2000` | STATUS_2 and STATUS_3 limit in ms |
-| `CAN_D1_VE_TLM_REQ` | `1` | Require telemetry for CAN pre-arm |
+| `CAN_D1_VE_ENG_TO` | `2000` | STATUS_2 and STATUS_3 limit in ms |
 | `CAN_D1_VE_ID1..ID6` | `1..6` | Motor-to-controller mapping |
-| `CAN_D1_VE_STOP_MS` | `500` | Disarm zero-command flush |
+| `CAN_D1_VE_STOPMS` | `500` | Disarm zero-command flush |
 
 Do not change mode while operating. Invalid or duplicate selected IDs, a
 selected motor without an assigned SRV motor function, a missing interface,
@@ -118,7 +117,7 @@ signed value.
 | STATUS_2 | Ah consumed, Ah regenerated | each `int32/10000` Ah |
 | STATUS_3 | Wh consumed, Wh regenerated | each `int32/10000` Wh |
 | STATUS_4 | MOSFET temp, motor temp, input current, PID position | `int16/10` C, `int16/10` C, `int16/10` A, `int16/50` |
-| STATUS_5 | tachometer, input voltage, optional status | `int32`, `uint16/10` V, optional `uint16` |
+| STATUS_5 | tachometer, input voltage, optional status | `int32`, `int16/10` V, optional `uint16` |
 
 Mechanical RPM is `electrical_eRPM / pole_pairs`. Both signed values are kept.
 
@@ -158,6 +157,7 @@ The following global `NAMED_VALUE_INT` values are produced:
 |---|---|
 | `VESC_STATE` | `0=off,1=waiting,2=ready,3=armed,4=zero flush,5=fault` |
 | `VESC_MODE` | `0=PPM,1=CAN` |
+| `VESC_PROTO` | `0=STANDARD,1=DEEPEX_V1` |
 | `VESC_EXP` | selected motor mask |
 | `VESC_PRES` | fresh STATUS_1 motor mask |
 | `VESC_MISS` | expected but not present mask |
@@ -182,14 +182,16 @@ The following global `NAMED_VALUE_INT` values are produced:
 Fields not representable by standard ESC telemetry use the existing MAVLink
 `DEBUG_FLOAT_ARRAY` message without a dialect change. The name is `VESC_V1`,
 `array_id` is the one-based ArduSub motor number, and one selected motor is
-published per INFO cycle. Consumers must check index 0 before decoding.
+published per INFO cycle. The MAVLink name field is exactly 10 bytes: the seven
+ASCII bytes `VESC_V1` followed by three zero bytes. Consumers must check index
+0 before decoding.
 
 | Index | Value |
 |---:|---|
 | 0 | contract version, exactly `1` |
 | 1 | one-based motor number |
 | 2 | CAN controller ID |
-| 3 | freshness/state bits: fast, extended, energy, stale, present, command-ready, active-fault at bits 0..6 |
+| 3 | state bits: fast, extended, energy, stale, present, command-ready, active-fault, configured, expected at bits 0..8 |
 | 4 | signed electrical eRPM |
 | 5 | signed mechanical RPM |
 | 6 | motor current A |
@@ -215,6 +217,45 @@ published per INFO cycle. Consumers must check index 0 before decoding.
 
 This layout is append-only within version 1. A semantic or scaling change
 requires a new name/version.
+
+Measurement values at indices 4..17 are zero when their corresponding
+freshness group has never become valid or has become stale. Fault and warning
+codes at indices 18..19 retain the last STATUS_5 report for diagnosis;
+timestamps at indices 20..24 retain the last update time. Consumers must use
+the validity bits in index 3 rather than treating zero as a valid measurement.
+Standard ESC telemetry omits a four-controller group when every member is
+stale.
+
+## Verified software checks
+
+The Linux SocketCAN software path was verified on a Raspberry Pi 5 at commit
+`b2844e34a3c0b3b5a20fd573b71e03521485493b`:
+
+```sh
+sudo bash libraries/AP_HAL_Linux/tests/run_vcan_rx_test.sh
+```
+
+Result: PASS. This covered external extended-frame reception without
+`MSG_CONFIRM`, local TX confirmation with `MSG_CONFIRM`, external/local
+loopback distinction, extended identifier and signed payload preservation, and
+safe interface-down failure.
+
+This result does not verify the physical USB-CAN adapter, 500 kbit/s bus,
+Distribution Board wiring, termination, or real VESC controllers.
+
+## Navigator build validation
+
+The supported Navigator ArduSub cross-build procedure is:
+
+```sh
+/home/ardupilot/venv-ardupilot/bin/python3 waf configure --board navigator
+/home/ardupilot/venv-ardupilot/bin/python3 waf sub
+```
+
+The implementation was built successfully with Waf 2.0.27, Python 3.12.3, and
+`arm-linux-gnueabihf-g++` 13.3.0. The final commit identity and binary SHA-256
+are recorded with the draft pull request validation evidence. The binary is
+not published, released, or installed by this procedure.
 
 ## Bench procedure
 
