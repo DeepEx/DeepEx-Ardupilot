@@ -84,6 +84,68 @@ struct Freshness {
     bool stale;
 };
 
+struct ControllerState {
+    int32_t erpm;
+    float mechanical_rpm;
+    float motor_current;
+    float duty_cycle;
+    float amp_hours;
+    float amp_hours_charged;
+    float watt_hours;
+    float watt_hours_charged;
+    float mosfet_temperature;
+    float motor_temperature;
+    float input_current;
+    float pid_position;
+    int32_t tachometer;
+    float input_voltage;
+    uint32_t last_status1_ms;
+    uint32_t last_status2_ms;
+    uint32_t last_status3_ms;
+    uint32_t last_status4_ms;
+    uint32_t last_status5_ms;
+    uint8_t controller_id;
+    uint8_t motor_number;
+    uint8_t fault_code;
+    uint8_t warning_flags;
+    bool configured;
+    bool expected;
+    bool present;
+    bool command_ready;
+    bool fast_telemetry_valid;
+    bool extended_telemetry_valid;
+    bool energy_telemetry_valid;
+    bool telemetry_stale;
+    bool active_fault;
+};
+
+enum class ConfigurationError : uint8_t {
+    NONE,
+    EMPTY_MASK,
+    INVALID_MASK,
+    INVALID_ID,
+    MISSING_FUNCTION,
+    DUPLICATE_ID,
+};
+
+struct ConfigurationResult {
+    ConfigurationError error;
+    uint8_t motor;
+    uint8_t other_motor;
+};
+
+struct CommandConditions {
+    bool armed;
+    bool emergency_stop;
+    bool command_fresh;
+    bool interface_available;
+    bool interface_down;
+    bool tx_healthy;
+    bool all_controllers_ready;
+};
+
+static constexpr uint8_t MAVLINK_EXTENSION_LENGTH = 58;
+
 bool make_set_rpm_frame(uint8_t controller_id, int32_t erpm, AP_HAL::CANFrame &frame);
 bool decode_status_1(const AP_HAL::CANFrame &frame, Status1 &status);
 bool decode_status_2(const AP_HAL::CANFrame &frame, Status2 &status);
@@ -103,6 +165,19 @@ Freshness freshness(uint32_t now_ms,
                     uint32_t energy_timeout_ms);
 bool can_command_mode(uint8_t mode);
 uint16_t physical_pwm(uint8_t mode, uint16_t requested_pwm, uint16_t neutral_pwm);
+bool allow_nonzero_command(const CommandConditions &conditions);
+int32_t safe_command_erpm(int32_t requested_erpm, const CommandConditions &conditions);
+bool zero_flush_complete(uint16_t expected_mask,
+                         uint16_t successful_zero_mask,
+                         uint32_t elapsed_ms,
+                         uint32_t required_ms);
+ConfigurationResult validate_configuration(uint16_t mask,
+                                           const int16_t *controller_ids,
+                                           const bool *function_assigned,
+                                           uint8_t motor_count);
+uint16_t freshness_flags(const ControllerState &state);
+void pack_mavlink_extension(const ControllerState &state,
+                            float (&data)[MAVLINK_EXTENSION_LENGTH]);
 
 int32_t pwm_to_erpm(uint16_t pwm,
                     uint16_t pwm_min,

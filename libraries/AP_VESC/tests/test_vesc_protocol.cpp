@@ -190,6 +190,163 @@ TEST(VESCProtocol, CommandModeAndPhysicalOutputPolicy)
     EXPECT_EQ(AP_VESC_Protocol::physical_pwm(1, 1700, 1500), 1500);
 }
 
+TEST(VESCProtocol, CommandSafetyConditions)
+{
+    AP_VESC_Protocol::CommandConditions conditions {
+        true,   // armed
+        false,  // emergency stop
+        true,   // command fresh
+        true,   // interface available
+        false,  // interface down
+        true,   // TX healthy
+        true,   // all controllers ready
+    };
+    EXPECT_TRUE(AP_VESC_Protocol::allow_nonzero_command(conditions));
+    EXPECT_EQ(AP_VESC_Protocol::safe_command_erpm(-17000, conditions), -17000);
+
+    conditions.command_fresh = false;
+    EXPECT_EQ(AP_VESC_Protocol::safe_command_erpm(17000, conditions), 0);
+    conditions.command_fresh = true;
+    conditions.armed = false;
+    EXPECT_EQ(AP_VESC_Protocol::safe_command_erpm(17000, conditions), 0);
+    conditions.armed = true;
+    conditions.emergency_stop = true;
+    EXPECT_EQ(AP_VESC_Protocol::safe_command_erpm(17000, conditions), 0);
+    conditions.emergency_stop = false;
+    conditions.interface_available = false;
+    EXPECT_EQ(AP_VESC_Protocol::safe_command_erpm(17000, conditions), 0);
+    conditions.interface_available = true;
+    conditions.interface_down = true;
+    EXPECT_EQ(AP_VESC_Protocol::safe_command_erpm(17000, conditions), 0);
+    conditions.interface_down = false;
+    conditions.all_controllers_ready = false;
+    EXPECT_EQ(AP_VESC_Protocol::safe_command_erpm(17000, conditions), 0);
+}
+
+TEST(VESCProtocol, ZeroFlushRequiresTimeAndEveryController)
+{
+    constexpr uint16_t expected = 0x003F;
+    EXPECT_FALSE(AP_VESC_Protocol::zero_flush_complete(expected, expected, 499, 500));
+    EXPECT_FALSE(AP_VESC_Protocol::zero_flush_complete(expected, 0x001F, 500, 500));
+    EXPECT_TRUE(AP_VESC_Protocol::zero_flush_complete(expected, expected, 500, 500));
+    EXPECT_TRUE(AP_VESC_Protocol::zero_flush_complete(0, 0, 500, 500));
+}
+
+TEST(VESCProtocol, SixMotorConfiguration)
+{
+    int16_t ids[12] {1, 2, 3, 4, 5, 6};
+    bool assigned[12] {true, true, true, true, true, true};
+
+    AP_VESC_Protocol::ConfigurationResult result =
+        AP_VESC_Protocol::validate_configuration(0x003F, ids, assigned, 12);
+    EXPECT_EQ(result.error, AP_VESC_Protocol::ConfigurationError::NONE);
+
+    ids[5] = 5;
+    result = AP_VESC_Protocol::validate_configuration(0x003F, ids, assigned, 12);
+    EXPECT_EQ(result.error, AP_VESC_Protocol::ConfigurationError::DUPLICATE_ID);
+    EXPECT_EQ(result.motor, 4);
+    EXPECT_EQ(result.other_motor, 5);
+
+    ids[5] = 6;
+    assigned[3] = false;
+    result = AP_VESC_Protocol::validate_configuration(0x003F, ids, assigned, 12);
+    EXPECT_EQ(result.error, AP_VESC_Protocol::ConfigurationError::MISSING_FUNCTION);
+    EXPECT_EQ(result.motor, 3);
+
+    assigned[3] = true;
+    ids[2] = 255;
+    result = AP_VESC_Protocol::validate_configuration(0x003F, ids, assigned, 12);
+    EXPECT_EQ(result.error, AP_VESC_Protocol::ConfigurationError::INVALID_ID);
+    EXPECT_EQ(result.motor, 2);
+
+    ids[2] = 3;
+    EXPECT_EQ(AP_VESC_Protocol::validate_configuration(0, ids, assigned, 12).error,
+              AP_VESC_Protocol::ConfigurationError::EMPTY_MASK);
+    EXPECT_EQ(AP_VESC_Protocol::validate_configuration(0x1000, ids, assigned, 12).error,
+              AP_VESC_Protocol::ConfigurationError::INVALID_MASK);
+}
+
+TEST(VESCProtocol, MAVLinkExtensionContract)
+{
+    AP_VESC_Protocol::ControllerState state {};
+    state.motor_number = 6;
+    state.controller_id = 42;
+    state.erpm = -17000;
+    state.mechanical_rpm = -17000.0f / 7.0f;
+    state.motor_current = -12.3f;
+    state.input_current = 10.2f;
+    state.duty_cycle = -0.5f;
+    state.input_voltage = 50.0f;
+    state.mosfet_temperature = 45.5f;
+    state.motor_temperature = 32.1f;
+    state.amp_hours = 1.2345f;
+    state.amp_hours_charged = 0.25f;
+    state.watt_hours = 6.789f;
+    state.watt_hours_charged = 1.5f;
+    state.pid_position = 24.68f;
+    state.tachometer = -12345;
+    state.fault_code = 7;
+    state.warning_flags = 0xA5;
+    state.last_status1_ms = 100;
+    state.last_status2_ms = 200;
+    state.last_status3_ms = 300;
+    state.last_status4_ms = 400;
+    state.last_status5_ms = 500;
+    state.configured = true;
+    state.expected = true;
+    state.present = true;
+    state.fast_telemetry_valid = true;
+    state.extended_telemetry_valid = true;
+    state.energy_telemetry_valid = true;
+    state.command_ready = false;
+    state.active_fault = true;
+
+    float data[AP_VESC_Protocol::MAVLINK_EXTENSION_LENGTH];
+    AP_VESC_Protocol::pack_mavlink_extension(state, data);
+    EXPECT_FLOAT_EQ(data[0], 1);
+    EXPECT_FLOAT_EQ(data[1], 6);
+    EXPECT_FLOAT_EQ(data[2], 42);
+    EXPECT_EQ(uint16_t(data[3]), 16U | 4U | 2U | 1U | 64U | 128U | 256U);
+    EXPECT_FLOAT_EQ(data[4], -17000);
+    EXPECT_FLOAT_EQ(data[5], -17000.0f / 7.0f);
+    EXPECT_FLOAT_EQ(data[6], -12.3f);
+    EXPECT_FLOAT_EQ(data[7], 10.2f);
+    EXPECT_FLOAT_EQ(data[8], -0.5f);
+    EXPECT_FLOAT_EQ(data[9], 50.0f);
+    EXPECT_FLOAT_EQ(data[10], 45.5f);
+    EXPECT_FLOAT_EQ(data[11], 32.1f);
+    EXPECT_FLOAT_EQ(data[12], 1.2345f);
+    EXPECT_FLOAT_EQ(data[13], 0.25f);
+    EXPECT_FLOAT_EQ(data[14], 6.789f);
+    EXPECT_FLOAT_EQ(data[15], 1.5f);
+    EXPECT_FLOAT_EQ(data[16], 24.68f);
+    EXPECT_FLOAT_EQ(data[17], -12345);
+    EXPECT_FLOAT_EQ(data[18], 7);
+    EXPECT_FLOAT_EQ(data[19], 0xA5);
+    EXPECT_FLOAT_EQ(data[20], 100);
+    EXPECT_FLOAT_EQ(data[21], 400);
+    EXPECT_FLOAT_EQ(data[22], 500);
+    EXPECT_FLOAT_EQ(data[23], 200);
+    EXPECT_FLOAT_EQ(data[24], 300);
+    for (uint8_t i = 25; i < AP_VESC_Protocol::MAVLINK_EXTENSION_LENGTH; i++) {
+        EXPECT_FLOAT_EQ(data[i], 0);
+    }
+
+    state.fast_telemetry_valid = false;
+    state.extended_telemetry_valid = false;
+    state.energy_telemetry_valid = false;
+    state.telemetry_stale = true;
+    AP_VESC_Protocol::pack_mavlink_extension(state, data);
+    EXPECT_EQ(uint16_t(data[3]), 8U | 16U | 64U | 128U | 256U);
+    for (uint8_t i = 4; i <= 17; i++) {
+        EXPECT_FLOAT_EQ(data[i], 0);
+    }
+    EXPECT_FLOAT_EQ(data[18], 7);
+    EXPECT_FLOAT_EQ(data[19], 0xA5);
+    EXPECT_FLOAT_EQ(data[20], 100);
+    EXPECT_FLOAT_EQ(data[24], 300);
+}
+
 TEST(VESCProtocol, RejectInvalidStatus1)
 {
     const uint8_t data[8] {};

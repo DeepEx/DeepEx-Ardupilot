@@ -44,38 +44,7 @@ public:
         FAULT = 5,
     };
 
-    struct ControllerState {
-        int32_t erpm;
-        float mechanical_rpm;
-        float motor_current;
-        float duty_cycle;
-        float amp_hours;
-        float amp_hours_charged;
-        float watt_hours;
-        float watt_hours_charged;
-        float mosfet_temperature;
-        float motor_temperature;
-        float input_current;
-        float pid_position;
-        int32_t tachometer;
-        float input_voltage;
-        uint32_t last_status1_ms;
-        uint32_t last_status2_ms;
-        uint32_t last_status3_ms;
-        uint32_t last_status4_ms;
-        uint32_t last_status5_ms;
-        uint8_t controller_id;
-        uint8_t motor_number;
-        uint8_t fault_code;
-        uint8_t warning_flags;
-        bool present;
-        bool command_ready;
-        bool fast_telemetry_valid;
-        bool extended_telemetry_valid;
-        bool energy_telemetry_valid;
-        bool telemetry_stale;
-        bool active_fault;
-    };
+    using ControllerState = AP_VESC_Protocol::ControllerState;
 
     AP_VESC();
 
@@ -93,10 +62,11 @@ public:
 
     bool pre_arm_check(char *reason, uint8_t reason_len) const;
 
-    Mode mode() const { return Mode(_mode.get()); }
-    AP_VESC_Protocol::Protocol protocol() const { return AP_VESC_Protocol::Protocol(_protocol.get()); }
+    Mode mode() const { return _active_mode; }
+    AP_VESC_Protocol::Protocol protocol() const { return _active_protocol; }
     uint16_t expected_mask() const;
     uint16_t present_mask() const;
+    uint16_t missing_mask() const { return expected_mask() & ~present_mask(); }
     uint16_t fault_mask() const;
     uint16_t diagnostic_flags() const;
     bool get_controller_state(uint8_t motor, ControllerState &state) const;
@@ -114,27 +84,31 @@ private:
     int8_t motor_for_controller_id(uint8_t controller_id) const;
     bool motor_is_selected(uint8_t motor) const;
 
-    AP_HAL::CANIface *_can_iface;
+    AP_HAL::CANIface *_can_iface = nullptr;
     HAL_BinarySemaphore _event_sem;
     HAL_Semaphore _command_sem;
 
-    bool _initialized;
-    uint8_t _driver_index;
-    char _thread_name[16];
+    bool _initialized = false;
+    bool _mode_latched = false;
+    uint8_t _driver_index = 0;
+    char _thread_name[16] {};
 
-    int32_t _command_erpm[MAX_ESC];
-    uint32_t _last_output_update_ms;
-    ControllerState _controller_state[MAX_ESC];
-    uint32_t _last_external_rx_ms;
-    uint32_t _tx_error_count;
-    uint32_t _unexpected_rx_count;
-    uint32_t _last_tx_failure_ms;
-    uint32_t _last_tx_success_ms;
-    bool _command_timeout_active;
+    int32_t _command_erpm[MAX_ESC] {};
+    uint32_t _last_output_update_ms = 0;
+    ControllerState _controller_state[MAX_ESC] {};
+    uint32_t _last_external_rx_ms = 0;
+    uint32_t _tx_error_count = 0;
+    uint32_t _unexpected_rx_count = 0;
+    uint32_t _last_tx_failure_ms = 0;
+    uint32_t _last_tx_success_ms = 0;
+    bool _command_timeout_active = false;
     ReadinessState _readiness_state = ReadinessState::POWERED_OFF;
-    bool _last_armed;
+    bool _last_armed = false;
     bool _zero_flush_complete = true;
-    uint32_t _disarm_flush_start_ms;
+    uint32_t _disarm_flush_start_ms = 0;
+    uint16_t _zero_flush_success_mask = 0;
+    Mode _active_mode = Mode::PPM;
+    AP_VESC_Protocol::Protocol _active_protocol = AP_VESC_Protocol::Protocol::STANDARD;
 
     AP_Int16 _esc_mask;
     AP_Int16 _output_rate_hz;
@@ -146,7 +120,6 @@ private:
     AP_Int16 _input_max;
     AP_Int16 _command_timeout_ms;
     AP_Int16 _telemetry_timeout_ms;
-    AP_Int8 _require_telemetry;
     AP_Int16 _disarm_flush_ms;
     AP_Int16 _controller_id[MAX_ESC];
     AP_Int8 _mode;
