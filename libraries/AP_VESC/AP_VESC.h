@@ -30,6 +30,11 @@ class AP_VESC : public AP_CANDriver, public AP_ESC_Telem_Backend
 public:
     static constexpr uint8_t MAX_ESC = 12;
 
+    enum class Mode : uint8_t {
+        PPM = 0,
+        CAN = 1,
+    };
+
     enum class ReadinessState : uint8_t {
         POWERED_OFF = 0,
         WAITING_TELEMETRY = 1,
@@ -37,6 +42,39 @@ public:
         ARMED = 3,
         DISARM_FLUSH = 4,
         FAULT = 5,
+    };
+
+    struct ControllerState {
+        int32_t erpm;
+        float mechanical_rpm;
+        float motor_current;
+        float duty_cycle;
+        float amp_hours;
+        float amp_hours_charged;
+        float watt_hours;
+        float watt_hours_charged;
+        float mosfet_temperature;
+        float motor_temperature;
+        float input_current;
+        float pid_position;
+        int32_t tachometer;
+        float input_voltage;
+        uint32_t last_status1_ms;
+        uint32_t last_status2_ms;
+        uint32_t last_status3_ms;
+        uint32_t last_status4_ms;
+        uint32_t last_status5_ms;
+        uint8_t controller_id;
+        uint8_t motor_number;
+        uint8_t fault_code;
+        uint8_t warning_flags;
+        bool present;
+        bool command_ready;
+        bool fast_telemetry_valid;
+        bool extended_telemetry_valid;
+        bool energy_telemetry_valid;
+        bool telemetry_stale;
+        bool active_fault;
     };
 
     AP_VESC();
@@ -55,8 +93,13 @@ public:
 
     bool pre_arm_check(char *reason, uint8_t reason_len) const;
 
+    Mode mode() const { return Mode(_mode.get()); }
+    AP_VESC_Protocol::Protocol protocol() const { return AP_VESC_Protocol::Protocol(_protocol.get()); }
     uint16_t expected_mask() const;
     uint16_t present_mask() const;
+    uint16_t fault_mask() const;
+    uint16_t diagnostic_flags() const;
+    bool get_controller_state(uint8_t motor, ControllerState &state) const;
     ReadinessState readiness_state() const { return _readiness_state; }
     bool zero_flush_complete() const { return _zero_flush_complete; }
 
@@ -81,8 +124,13 @@ private:
 
     int32_t _command_erpm[MAX_ESC];
     uint32_t _last_output_update_ms;
-    uint32_t _last_telem_ms[MAX_ESC];
+    ControllerState _controller_state[MAX_ESC];
+    uint32_t _last_external_rx_ms;
     uint32_t _tx_error_count;
+    uint32_t _unexpected_rx_count;
+    uint32_t _last_tx_failure_ms;
+    uint32_t _last_tx_success_ms;
+    bool _command_timeout_active;
     ReadinessState _readiness_state = ReadinessState::POWERED_OFF;
     bool _last_armed;
     bool _zero_flush_complete = true;
@@ -101,6 +149,10 @@ private:
     AP_Int8 _require_telemetry;
     AP_Int16 _disarm_flush_ms;
     AP_Int16 _controller_id[MAX_ESC];
+    AP_Int8 _mode;
+    AP_Int8 _protocol;
+    AP_Int16 _extended_timeout_ms;
+    AP_Int16 _energy_timeout_ms;
 };
 
 #endif // AP_VESC_ENABLED

@@ -486,6 +486,17 @@ void SRV_Channels::cork()
  */
 void SRV_Channels::push()
 {
+#if AP_VESC_ENABLED
+    // VESC snapshots the mixed PWM values, then overwrites selected physical
+    // outputs with neutral before the HAL pushes them to the pins.
+    for (uint8_t i = 0; i < AP::can().get_num_drivers(); i++) {
+        AP_VESC *vesc = AP_VESC::get_vesc(i);
+        if (vesc != nullptr) {
+            vesc->update();
+        }
+    }
+#endif
+
     hal.rcout->push();
 
 #if AP_VOLZ_ENABLED
@@ -545,10 +556,6 @@ void SRV_Channels::push()
 #endif
 #if AP_VESC_ENABLED
             case AP_CAN::Protocol::VESC: {
-                AP_VESC *vesc = AP_VESC::get_vesc(i);
-                if (vesc != nullptr) {
-                    vesc->update();
-                }
                 break;
             }
 #endif

@@ -205,6 +205,8 @@ bool GCS_MAVLINK_Sub::send_info()
         CHECK_PAYLOAD_SIZE(NAMED_VALUE_INT);
         send_named_int("VESC_STATE", int32_t(vesc->readiness_state()));
         CHECK_PAYLOAD_SIZE(NAMED_VALUE_INT);
+        send_named_int("VESC_MODE", int32_t(vesc->mode()));
+        CHECK_PAYLOAD_SIZE(NAMED_VALUE_INT);
         send_named_int("VESC_EXP", expected);
         CHECK_PAYLOAD_SIZE(NAMED_VALUE_INT);
         send_named_int("VESC_PRES", present);
@@ -212,6 +214,63 @@ bool GCS_MAVLINK_Sub::send_info()
         send_named_int("VESC_MISS", expected & ~present);
         CHECK_PAYLOAD_SIZE(NAMED_VALUE_INT);
         send_named_int("VESC_SAFE", vesc->zero_flush_complete() ? 1 : 0);
+        CHECK_PAYLOAD_SIZE(NAMED_VALUE_INT);
+        send_named_int("VESC_DIAG", vesc->diagnostic_flags());
+        CHECK_PAYLOAD_SIZE(NAMED_VALUE_INT);
+        send_named_int("VESC_FLT", vesc->fault_mask());
+
+        // Versioned extension for fields that cannot be represented without
+        // overloading ESC_TELEMETRY. One selected motor is sent per INFO cycle.
+        static uint8_t next_motor;
+        for (uint8_t offset = 0; offset < AP_VESC::MAX_ESC; offset++) {
+            const uint8_t motor = (next_motor + offset) % AP_VESC::MAX_ESC;
+            AP_VESC::ControllerState state {};
+            if (!vesc->get_controller_state(motor, state)) {
+                continue;
+            }
+            next_motor = (motor + 1) % AP_VESC::MAX_ESC;
+            uint16_t freshness = 0;
+            freshness |= state.fast_telemetry_valid ? 1U : 0U;
+            freshness |= state.extended_telemetry_valid ? 2U : 0U;
+            freshness |= state.energy_telemetry_valid ? 4U : 0U;
+            freshness |= state.telemetry_stale ? 8U : 0U;
+            freshness |= state.present ? 16U : 0U;
+            freshness |= state.command_ready ? 32U : 0U;
+            freshness |= state.active_fault ? 64U : 0U;
+            float data[58] {};
+            data[0] = 1; // producer contract version
+            data[1] = state.motor_number;
+            data[2] = state.controller_id;
+            data[3] = freshness;
+            data[4] = state.erpm;
+            data[5] = state.mechanical_rpm;
+            data[6] = state.motor_current;
+            data[7] = state.input_current;
+            data[8] = state.duty_cycle;
+            data[9] = state.input_voltage;
+            data[10] = state.mosfet_temperature;
+            data[11] = state.motor_temperature;
+            data[12] = state.amp_hours;
+            data[13] = state.amp_hours_charged;
+            data[14] = state.watt_hours;
+            data[15] = state.watt_hours_charged;
+            data[16] = state.pid_position;
+            data[17] = state.tachometer;
+            data[18] = state.fault_code;
+            data[19] = state.warning_flags;
+            data[20] = state.last_status1_ms;
+            data[21] = state.last_status4_ms;
+            data[22] = state.last_status5_ms;
+            data[23] = state.last_status2_ms;
+            data[24] = state.last_status3_ms;
+            CHECK_PAYLOAD_SIZE(DEBUG_FLOAT_ARRAY);
+            mavlink_msg_debug_float_array_send(chan,
+                                               AP_HAL::micros64(),
+                                               "VESC_V1",
+                                               state.motor_number,
+                                               data);
+            break;
+        }
         break;
     }
 #endif

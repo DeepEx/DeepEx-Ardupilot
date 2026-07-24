@@ -76,10 +76,10 @@ public:
     int16_t receive(AP_HAL::CANFrame& out_frame, uint64_t& out_timestamp_us,
                     CanIOFlags& out_flags) override;
 
-    // Always return false, there's no busoff condition in Linux CAN
+    // Linux reports interface removal/down through poll errors.
     bool is_busoff() const override
     {
-        return false;
+        return _down;
     }
 
     void flush_tx() override;

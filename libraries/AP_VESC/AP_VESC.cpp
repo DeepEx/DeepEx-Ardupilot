@@ -211,6 +211,38 @@ const AP_Param::GroupInfo AP_VESC::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("STOP_MS", 24, AP_VESC, _disarm_flush_ms, 500),
 
+    // @Param: MODE
+    // @DisplayName: VESC propulsion command mode
+    // @Description: Select PPM outputs or VESC CAN RPM commands. PPM never transmits motor commands. CAN suppresses PWM on selected motor outputs and never falls back automatically.
+    // @Values: 0:PPM,1:CAN
+    // @User: Advanced
+    // @RebootRequired: True
+    AP_GROUPINFO("MODE", 25, AP_VESC, _mode, int8_t(Mode::PPM)),
+
+    // @Param: PROTO
+    // @DisplayName: VESC CAN telemetry protocol
+    // @Description: STANDARD ignores reserved status fields. DEEPEX_V1 decodes the STATUS_5 reserved field as fault code and warning flags.
+    // @Values: 0:STANDARD,1:DEEPEX_V1
+    // @User: Advanced
+    // @RebootRequired: True
+    AP_GROUPINFO("PROTO", 26, AP_VESC, _protocol, int8_t(AP_VESC_Protocol::Protocol::STANDARD)),
+
+    // @Param: EXT_TO
+    // @DisplayName: VESC extended telemetry timeout
+    // @Description: Maximum age of both STATUS_4 and STATUS_5 for command readiness
+    // @Units: ms
+    // @Range: 200 5000
+    // @User: Advanced
+    AP_GROUPINFO("EXT_TO", 27, AP_VESC, _extended_timeout_ms, 1000),
+
+    // @Param: ENRG_TO
+    // @DisplayName: VESC energy telemetry timeout
+    // @Description: Maximum age of both STATUS_2 and STATUS_3 when reporting energy telemetry validity
+    // @Units: ms
+    // @Range: 500 10000
+    // @User: Advanced
+    AP_GROUPINFO("ENRG_TO", 28, AP_VESC, _energy_timeout_ms, 2000),
+
     AP_GROUPEND
 };
 
@@ -274,12 +306,100 @@ uint16_t AP_VESC::present_mask() const
     const uint32_t timeout_ms = MAX(100, _telemetry_timeout_ms.get());
     uint16_t mask = 0;
     for (uint8_t motor = 0; motor < MAX_ESC; motor++) {
-        const uint32_t last_telem_ms = _last_telem_ms[motor];
+        const uint32_t last_telem_ms = _controller_state[motor].last_status1_ms;
         if (motor_is_selected(motor) && last_telem_ms != 0 && now_ms - last_telem_ms <= timeout_ms) {
             mask |= 1U << motor;
         }
     }
     return mask;
+}
+
+uint16_t AP_VESC::fault_mask() const
+{
+    uint16_t mask = 0;
+    for (uint8_t motor = 0; motor < MAX_ESC; motor++) {
+        if (motor_is_selected(motor) && _controller_state[motor].active_fault) {
+            mask |= 1U << motor;
+        }
+    }
+    return mask;
+}
+
+uint16_t AP_VESC::diagnostic_flags() const
+{
+    enum : uint16_t {
+        DRIVER_UNAVAILABLE = 1U << 0,
+        NO_EXTERNAL_RX = 1U << 1,
+        INTERFACE_DOWN = 1U << 2,
+        TX_FAILURE = 1U << 3,
+        UNEXPECTED_CONTROLLER = 1U << 4,
+        REQUIRED_MISSING = 1U << 5,
+        ACTIVE_FAULT = 1U << 6,
+        COMMAND_TIMEOUT = 1U << 7,
+        ZERO_FLUSH_INCOMPLETE = 1U << 8,
+    };
+    uint16_t flags = 0;
+    const uint32_t now_ms = AP_HAL::millis();
+    if (!_initialized || _can_iface == nullptr) {
+        flags |= DRIVER_UNAVAILABLE;
+    } else if (_can_iface->is_busoff()) {
+        flags |= INTERFACE_DOWN;
+    }
+    if (_last_external_rx_ms == 0) {
+        flags |= NO_EXTERNAL_RX;
+    }
+    if (_last_tx_failure_ms != 0 &&
+        (_last_tx_success_ms == 0 || _last_tx_failure_ms > _last_tx_success_ms) &&
+        now_ms - _last_tx_failure_ms < 5000) {
+        flags |= TX_FAILURE;
+    }
+    if (_unexpected_rx_count != 0) {
+        flags |= UNEXPECTED_CONTROLLER;
+    }
+    if ((expected_mask() & ~present_mask()) != 0) {
+        flags |= REQUIRED_MISSING;
+    }
+    if (fault_mask() != 0) {
+        flags |= ACTIVE_FAULT;
+    }
+    if (_command_timeout_active) {
+        flags |= COMMAND_TIMEOUT;
+    }
+    if (!_zero_flush_complete) {
+        flags |= ZERO_FLUSH_INCOMPLETE;
+    }
+    return flags;
+}
+
+bool AP_VESC::get_controller_state(const uint8_t motor, ControllerState &state) const
+{
+    if (motor >= MAX_ESC || !motor_is_selected(motor)) {
+        return false;
+    }
+    state = _controller_state[motor];
+    const uint32_t now_ms = AP_HAL::millis();
+    const uint32_t fast_timeout = MAX(100, _telemetry_timeout_ms.get());
+    const uint32_t extended_timeout = MAX(200, _extended_timeout_ms.get());
+    const uint32_t energy_timeout = MAX(500, _energy_timeout_ms.get());
+    const AP_VESC_Protocol::Freshness freshness =
+        AP_VESC_Protocol::freshness(now_ms,
+                                    state.last_status1_ms,
+                                    state.last_status2_ms,
+                                    state.last_status3_ms,
+                                    state.last_status4_ms,
+                                    state.last_status5_ms,
+                                    fast_timeout,
+                                    extended_timeout,
+                                    energy_timeout);
+    state.fast_telemetry_valid = freshness.fast;
+    state.extended_telemetry_valid = freshness.extended;
+    state.energy_telemetry_valid = freshness.energy;
+    state.present = state.fast_telemetry_valid;
+    state.telemetry_stale = freshness.stale;
+    state.command_ready = state.fast_telemetry_valid &&
+                          state.extended_telemetry_valid &&
+                          !state.active_fault;
+    return true;
 }
 
 int8_t AP_VESC::motor_for_controller_id(const uint8_t controller_id) const
@@ -294,6 +414,9 @@ int8_t AP_VESC::motor_for_controller_id(const uint8_t controller_id) const
 
 void AP_VESC::update()
 {
+    if (!AP_VESC_Protocol::can_command_mode(_mode.get())) {
+        return;
+    }
     const bool outputs_enabled = hal.util->get_soft_armed() && !SRV_Channels::get_emergency_stop();
     const uint16_t pwm_min = _input_min.get();
     const uint16_t pwm_mid = _input_mid.get();
@@ -317,6 +440,10 @@ void AP_VESC::update()
                                    pwm_max,
                                    max_erpm,
                                    exponent);
+        }
+        uint8_t channel;
+        if (SRV_Channels::find_channel(function, channel)) {
+            hal.rcout->write(channel, AP_VESC_Protocol::physical_pwm(_mode.get(), pwm, pwm_mid));
         }
     }
     _last_output_update_ms = AP_HAL::millis();
@@ -356,6 +483,11 @@ bool AP_VESC::read_frame(AP_HAL::CANFrame &frame, const uint32_t timeout_us)
 
 void AP_VESC::send_commands()
 {
+    if (!AP_VESC_Protocol::can_command_mode(_mode.get())) {
+        _zero_flush_complete = true;
+        _readiness_state = ReadinessState::POWERED_OFF;
+        return;
+    }
     int32_t command_erpm[MAX_ESC] {};
     uint32_t last_output_update_ms;
     {
@@ -369,11 +501,25 @@ void AP_VESC::send_commands()
     const bool output_fresh = last_output_update_ms != 0 &&
                               now_ms - last_output_update_ms <= command_timeout_ms;
     const bool armed = hal.util->get_soft_armed();
-    const bool outputs_enabled = output_fresh && armed &&
-                                 !SRV_Channels::get_emergency_stop();
-
     const uint16_t expected = expected_mask();
     const uint16_t present = present_mask();
+    uint16_t ready = 0;
+    for (uint8_t motor = 0; motor < MAX_ESC; motor++) {
+        ControllerState state {};
+        if (get_controller_state(motor, state) && state.command_ready) {
+            ready |= 1U << motor;
+        }
+    }
+    const bool tx_healthy = _last_tx_failure_ms == 0 ||
+                            (_last_tx_success_ms != 0 && _last_tx_success_ms > _last_tx_failure_ms) ||
+                            now_ms - _last_tx_failure_ms >= 5000;
+    const bool outputs_enabled = output_fresh && armed &&
+                                 !SRV_Channels::get_emergency_stop() &&
+                                 ready == expected &&
+                                 _can_iface != nullptr &&
+                                 !_can_iface->is_busoff() &&
+                                 tx_healthy;
+    _command_timeout_active = armed && !output_fresh;
 
     if (_last_armed && !armed) {
         _disarm_flush_start_ms = now_ms;
@@ -392,7 +538,7 @@ void AP_VESC::send_commands()
 
     if (armed) {
         _zero_flush_complete = false;
-        _readiness_state = present == expected ? ReadinessState::ARMED : ReadinessState::FAULT;
+        _readiness_state = outputs_enabled ? ReadinessState::ARMED : ReadinessState::FAULT;
     } else if (flushing) {
         _readiness_state = ReadinessState::DISARM_FLUSH;
     } else if (present == 0) {
@@ -427,33 +573,116 @@ void AP_VESC::send_commands()
         if (!AP_VESC_Protocol::make_set_rpm_frame(controller_id, command_erpm[motor], frame) ||
             !write_frame(frame, 1000)) {
             _tx_error_count++;
+            _last_tx_failure_ms = now_ms;
+        } else {
+            _last_tx_success_ms = now_ms;
         }
     }
 }
 
 void AP_VESC::handle_frame(const AP_HAL::CANFrame &frame)
 {
-    AP_VESC_Protocol::Status1 status {};
-    if (!AP_VESC_Protocol::decode_status_1(frame, status)) {
+    const AP_VESC_Protocol::StatusType type = AP_VESC_Protocol::status_type(frame);
+    if (type == AP_VESC_Protocol::StatusType::NONE) {
         return;
     }
 
-    const int8_t motor = motor_for_controller_id(status.controller_id);
+    const uint8_t controller_id = frame.id & 0xFF;
+    const int8_t motor = motor_for_controller_id(controller_id);
     if (motor < 0) {
+        _unexpected_rx_count++;
         return;
     }
-    _last_telem_ms[motor] = AP_HAL::millis();
+    const uint32_t now_ms = AP_HAL::millis();
+    _last_external_rx_ms = now_ms;
+    ControllerState &state = _controller_state[motor];
+    state.controller_id = controller_id;
+    state.motor_number = motor + 1;
 
+    switch (type) {
+    case AP_VESC_Protocol::StatusType::STATUS_1: {
+        AP_VESC_Protocol::Status1 status {};
+        if (!AP_VESC_Protocol::decode_status_1(frame, status)) {
+            return;
+        }
+        state.erpm = status.erpm;
+        state.mechanical_rpm = AP_VESC_Protocol::mechanical_rpm(status.erpm, MAX(1, _pole_pairs.get()));
+        state.motor_current = status.current;
+        state.duty_cycle = status.duty_cycle;
+        state.last_status1_ms = now_ms;
 #if HAL_WITH_ESC_TELEM
-    const int8_t pole_pairs = _pole_pairs.get();
-    if (pole_pairs > 0) {
-        update_rpm(motor, status.erpm / float(pole_pairs));
-    }
-
-    AP_ESC_Telem_Backend::TelemetryData telem {};
-    telem.current = status.current;
-    update_telem_data(motor, telem, AP_ESC_Telem_Backend::TelemetryType::CURRENT);
+        update_rpm(motor, status.erpm);
 #endif
+        break;
+    }
+    case AP_VESC_Protocol::StatusType::STATUS_2: {
+        AP_VESC_Protocol::Status2 status {};
+        if (!AP_VESC_Protocol::decode_status_2(frame, status)) {
+            return;
+        }
+        state.amp_hours = status.amp_hours;
+        state.amp_hours_charged = status.amp_hours_charged;
+        state.last_status2_ms = now_ms;
+#if HAL_WITH_ESC_TELEM
+        AP_ESC_Telem_Backend::TelemetryData telem {};
+        telem.consumption_mah = status.amp_hours * 1000.0f;
+        update_telem_data(motor, telem, AP_ESC_Telem_Backend::TelemetryType::CONSUMPTION);
+#endif
+        break;
+    }
+    case AP_VESC_Protocol::StatusType::STATUS_3: {
+        AP_VESC_Protocol::Status3 status {};
+        if (!AP_VESC_Protocol::decode_status_3(frame, status)) {
+            return;
+        }
+        state.watt_hours = status.watt_hours;
+        state.watt_hours_charged = status.watt_hours_charged;
+        state.last_status3_ms = now_ms;
+        break;
+    }
+    case AP_VESC_Protocol::StatusType::STATUS_4: {
+        AP_VESC_Protocol::Status4 status {};
+        if (!AP_VESC_Protocol::decode_status_4(frame, status)) {
+            return;
+        }
+        state.mosfet_temperature = status.mosfet_temperature;
+        state.motor_temperature = status.motor_temperature;
+        state.input_current = status.input_current;
+        state.pid_position = status.pid_position;
+        state.last_status4_ms = now_ms;
+#if HAL_WITH_ESC_TELEM
+        AP_ESC_Telem_Backend::TelemetryData telem {};
+        telem.temperature_cdeg = status.mosfet_temperature * 100;
+        telem.motor_temp_cdeg = status.motor_temperature * 100;
+        telem.current = status.input_current;
+        update_telem_data(motor, telem,
+                          AP_ESC_Telem_Backend::TelemetryType::TEMPERATURE |
+                          AP_ESC_Telem_Backend::TelemetryType::MOTOR_TEMPERATURE |
+                          AP_ESC_Telem_Backend::TelemetryType::CURRENT);
+#endif
+        break;
+    }
+    case AP_VESC_Protocol::StatusType::STATUS_5: {
+        AP_VESC_Protocol::Status5 status {};
+        if (!AP_VESC_Protocol::decode_status_5(frame, protocol(), status)) {
+            return;
+        }
+        state.tachometer = status.tachometer;
+        state.input_voltage = status.input_voltage;
+        state.fault_code = status.fault_code;
+        state.warning_flags = status.warning_flags;
+        state.active_fault = status.fault_code != 0;
+        state.last_status5_ms = now_ms;
+#if HAL_WITH_ESC_TELEM
+        AP_ESC_Telem_Backend::TelemetryData telem {};
+        telem.voltage = status.input_voltage;
+        update_telem_data(motor, telem, AP_ESC_Telem_Backend::TelemetryType::VOLTAGE);
+#endif
+        break;
+    }
+    case AP_VESC_Protocol::StatusType::NONE:
+        break;
+    }
 }
 
 void AP_VESC::loop()
@@ -480,8 +709,19 @@ void AP_VESC::loop()
 
 bool AP_VESC::pre_arm_check(char *reason, const uint8_t reason_len) const
 {
+    if (mode() == Mode::PPM) {
+        return true;
+    }
+    if (mode() != Mode::CAN) {
+        hal.util->snprintf(reason, reason_len, "invalid command mode");
+        return false;
+    }
     if (!_initialized || _can_iface == nullptr) {
         hal.util->snprintf(reason, reason_len, "driver not initialized");
+        return false;
+    }
+    if (_can_iface->is_busoff()) {
+        hal.util->snprintf(reason, reason_len, "CAN interface down");
         return false;
     }
     if ((_esc_mask.get() & ((1U << MAX_ESC) - 1U)) == 0) {
@@ -516,6 +756,12 @@ bool AP_VESC::pre_arm_check(char *reason, const uint8_t reason_len) const
         hal.util->snprintf(reason, reason_len, "invalid disarm flush time");
         return false;
     }
+    if (_last_tx_failure_ms != 0 &&
+        (_last_tx_success_ms == 0 || _last_tx_failure_ms > _last_tx_success_ms) &&
+        AP_HAL::millis() - _last_tx_failure_ms < 5000) {
+        hal.util->snprintf(reason, reason_len, "recent CAN TX failure");
+        return false;
+    }
 
     for (uint8_t motor = 0; motor < MAX_ESC; motor++) {
         if (!motor_is_selected(motor)) {
@@ -530,11 +776,20 @@ bool AP_VESC::pre_arm_check(char *reason, const uint8_t reason_len) const
             hal.util->snprintf(reason, reason_len, "motor %u function missing", motor + 1);
             return false;
         }
-        if (_require_telemetry &&
-            (_last_telem_ms[motor] == 0 ||
-             AP_HAL::millis() - _last_telem_ms[motor] > uint32_t(_telemetry_timeout_ms.get()))) {
-            hal.util->snprintf(reason, reason_len, "motor %u telemetry missing", motor + 1);
-            return false;
+        if (_require_telemetry) {
+            ControllerState state {};
+            if (!get_controller_state(motor, state) || !state.fast_telemetry_valid) {
+                hal.util->snprintf(reason, reason_len, "motor %u STATUS_1 stale", motor + 1);
+                return false;
+            }
+            if (!state.extended_telemetry_valid) {
+                hal.util->snprintf(reason, reason_len, "motor %u STATUS_4/5 stale", motor + 1);
+                return false;
+            }
+            if (state.active_fault) {
+                hal.util->snprintf(reason, reason_len, "motor %u fault %u", motor + 1, state.fault_code);
+                return false;
+            }
         }
         for (uint8_t other = motor + 1; other < MAX_ESC; other++) {
             if (motor_is_selected(other) && _controller_id[motor] == _controller_id[other]) {
