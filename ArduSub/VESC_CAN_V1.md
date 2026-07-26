@@ -278,10 +278,28 @@ the leading cause of those symptoms. It is not established as the sole cause
 until the new Navigator64 binary is installed and starts successfully on
 BlueOS. This is a deployment-target mismatch, not physical CAN validation.
 
-The `navigator64` implementation was cross-built successfully with Waf 2.0.27,
-Python 3.12.3, and `aarch64-linux-gnu-g++` 13.3.0. The final commit identity and
-binary SHA-256 are recorded with the draft pull request validation evidence.
-The binary is not published, released, or installed by this procedure.
+### BlueOS dynamic-loader compatibility
+
+Calypso Beta BlueOS runs on Debian 12 with glibc 2.36. A structurally correct
+ELF64 AArch64 `navigator64` artifact built with the Ubuntu 24.04 AArch64
+cross-compilation sysroot required `GLIBC_2.38` and could not start. The
+dynamic loader reported:
+
+```text
+libc.so.6: version `GLIBC_2.38' not found
+libm.so.6: version `GLIBC_2.38' not found
+```
+
+Firmware upload and integrity verification succeeded, but ArduSub produced no
+heartbeat. MAVLink-Server restart errors and vehicle-type notifications were
+secondary effects of ArduSub failing in the dynamic loader.
+
+The replacement artifact is built in an official Ubuntu 22.04 environment.
+ELF version-information validation shows a maximum requirement of
+`GLIBC_2.34`, with no required GLIBC symbol newer than the BlueOS glibc 2.36
+runtime. This is software deployment compatibility evidence only. It does not
+claim successful execution on BlueOS; the replacement artifact has not yet
+been installed and observed running on the Raspberry Pi.
 
 The integration remains **NOT QUALIFIED**. Physical validation of the SH-C30A
 USB-CAN adapter, 500 kbit/s bus, termination, cabling, and real VESC controllers
