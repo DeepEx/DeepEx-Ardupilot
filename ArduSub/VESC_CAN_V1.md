@@ -243,19 +243,49 @@ safe interface-down failure.
 This result does not verify the physical USB-CAN adapter, 500 kbit/s bus,
 Distribution Board wiring, termination, or real VESC controllers.
 
-## Navigator build validation
+## Navigator deployment target and build validation
 
-The supported Navigator ArduSub cross-build procedure is:
+The `navigator` target produces a 32-bit ARM binary. The `navigator64` target
+produces the AArch64 binary required by the active Calypso Beta BlueOS
+platform:
 
 ```sh
-/home/ardupilot/venv-ardupilot/bin/python3 waf configure --board navigator
+/home/ardupilot/venv-ardupilot/bin/python3 waf configure --board navigator64
 /home/ardupilot/venv-ardupilot/bin/python3 waf sub
 ```
 
-The implementation was built successfully with Waf 2.0.27, Python 3.12.3, and
-`arm-linux-gnueabihf-g++` 13.3.0. The final commit identity and binary SHA-256
-are recorded with the draft pull request validation evidence. The binary is
-not published, released, or installed by this procedure.
+The previous artifact had this identity:
+
+```text
+target: navigator
+size: 3,022,380 bytes
+SHA-256: cc76ae63543c8d7a7114b751ed8c3ab2713219a8a451cd56a13c659229bc1c93
+type: ELF 32-bit ARM
+internal version: ArduSub V4.8.0-dev
+```
+
+BlueOS installed that artifact into its Navigator64 firmware slot, but the
+autopilot did not remain running and produced no MAVLink heartbeat. The
+observed BlueOS notifications were:
+
+```text
+AUTOPILOT_VEHICLE_TYPE_FETCH_FAIL
+AUTOPILOT_FIRMWARE_VEHICLE_TYPE_FETCH_FAIL
+```
+
+The 32-bit artifact in a Navigator64 slot is an identified incompatibility and
+the leading cause of those symptoms. It is not established as the sole cause
+until the new Navigator64 binary is installed and starts successfully on
+BlueOS. This is a deployment-target mismatch, not physical CAN validation.
+
+The `navigator64` implementation was cross-built successfully with Waf 2.0.27,
+Python 3.12.3, and `aarch64-linux-gnu-g++` 13.3.0. The final commit identity and
+binary SHA-256 are recorded with the draft pull request validation evidence.
+The binary is not published, released, or installed by this procedure.
+
+The integration remains **NOT QUALIFIED**. Physical validation of the SH-C30A
+USB-CAN adapter, 500 kbit/s bus, termination, cabling, and real VESC controllers
+is still outstanding.
 
 ## Bench procedure
 
