@@ -471,15 +471,9 @@ bool AP_VESC::write_frame(const AP_HAL::CANFrame &frame, const uint32_t timeout_
     return _can_iface->send(frame, deadline_us, AP_HAL::CANIface::AbortOnError) == 1;
 }
 
-bool AP_VESC::read_frame(AP_HAL::CANFrame &frame, const uint32_t timeout_us)
+bool AP_VESC::read_frame(AP_HAL::CANFrame &frame)
 {
     if (!_initialized || _can_iface == nullptr) {
-        return false;
-    }
-
-    bool read_select = true;
-    bool write_select = false;
-    if (!_can_iface->select(read_select, write_select, nullptr, AP_HAL::micros64() + timeout_us) || !read_select) {
         return false;
     }
 
@@ -719,7 +713,7 @@ void AP_VESC::loop()
         }
 
         AP_HAL::CANFrame frame;
-        while (read_frame(frame, 0)) {
+        while (read_frame(frame)) {
             handle_frame(frame);
         }
         hal.scheduler->delay_microseconds(1000);

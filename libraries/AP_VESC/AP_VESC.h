@@ -74,12 +74,14 @@ public:
     bool zero_flush_complete() const { return _zero_flush_complete; }
 
 private:
+    friend class AP_VESC_SocketCANReceiveTest;
+
     void loop();
     void send_commands();
     void handle_frame(const AP_HAL::CANFrame &frame);
 
     bool write_frame(const AP_HAL::CANFrame &frame, uint32_t timeout_us);
-    bool read_frame(AP_HAL::CANFrame &frame, uint32_t timeout_us);
+    bool read_frame(AP_HAL::CANFrame &frame);
 
     int8_t motor_for_controller_id(uint8_t controller_id) const;
     bool motor_is_selected(uint8_t motor) const;
