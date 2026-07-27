@@ -92,6 +92,38 @@ bookkeeping. Local loopback is not presented as external VESC telemetry.
 Malformed/truncated frames are rejected and VESC decoding rejects error, RTR,
 non-extended, wrong-length, and unknown packet frames.
 
+### First physical receive test and software correction
+
+The first Calypso Beta receive test used the SH-C30A through the Linux `gs_usb`
+driver. `can0` was configured at 500 kbit/s and remained `ERROR-ACTIVE`, with
+zero RX errors, zero dropped frames, and no bus-off. The VESC used controller
+ID 2 and produced STATUS_1 (`0x00000902`) at approximately 20 Hz and STATUS_2
+through STATUS_5 (`0x00000E02`, `0x00000F02`, `0x00001002`, and `0x00001B02`)
+at approximately 5 Hz. The kernel received more than 112,000 frames. No
+SET_RPM frame (`0x00000302`) was observed in PPM mode.
+
+The `VESC_0` thread was present, but the pre-fix MAVLink state was
+`VESC_EXP=2`, `VESC_PRES=0`, `VESC_MISS=2`, and `VESC_DIAG=34`. Diagnostic
+bits 1 and 5 reported no external VESC RX and the required controller missing.
+This established that the interface and thread were initialized while frames
+received by the Linux kernel did not reach `AP_VESC::handle_frame()`.
+
+The defect was the AP_VESC zero-timeout select-first sequence. Linux
+`CANIface::select()` checked only its internal RX queue once the deadline had
+elapsed. With that queue empty, AP_VESC did not call `CANIface::receive()`, so
+the SocketCAN socket was never polled and the external frame could not enter
+the queue. AP_VESC now calls the generic non-blocking `CANIface::receive()`
+directly and continues draining all available frames before the existing
+one-millisecond loop delay.
+
+The C++ vcan regression injects an external extended STATUS_1 frame for
+controller 2, verifies that the former current-time select-first sequence does
+not consume it, and verifies that the AP_VESC direct receive path returns and
+decodes it with its identifier, DLC, payload, and external/non-loopback
+classification preserved. Result: PASS. This is software regression evidence
+only. The rebuilt binary has not been installed or physically retested on
+BlueOS, and the integration remains NOT QUALIFIED.
+
 ## VESC application configuration
 
 Configure each VESC locally; ArduSub does not rewrite or persist VESC settings.
