@@ -21,7 +21,9 @@ void Sub::motors_output()
     }
     // check if we are performing the motor test
     if (ap.motor_test) {
-        verify_motor_test();
+        if (verify_motor_test()) {
+            AP::srv().push();
+        }
     } else {
         motors.set_interlock(true);
         auto &srv = AP::srv();
