@@ -83,6 +83,10 @@ private:
 
 TEST(VESCSocketCANReceive, ExternalStatus1ReachesAPVESC)
 {
+    if (if_nametoindex("vcan0") == 0) {
+        GTEST_SKIP() << "requires vcan0; run through run_vesc_socketcan_rx_test.sh";
+    }
+
     static Linux::CANIface can_iface(0);
     ASSERT_TRUE(can_iface.init(500000));
 
