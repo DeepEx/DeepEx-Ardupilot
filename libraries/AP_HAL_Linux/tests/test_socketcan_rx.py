@@ -9,7 +9,6 @@ import struct
 import subprocess
 import unittest
 
-
 CAN_EFF_FLAG = 0x80000000
 CAN_EFF_MASK = 0x1FFFFFFF
 CAN_RAW_RECV_OWN_MSGS = 4
