@@ -4,6 +4,8 @@
 
 const AP_HAL::HAL &hal = AP_HAL::get_HAL();
 
+#if AP_VESC_ENABLED
+
 class AP_VESC_CommandSchedulerTest
 {
 public:
@@ -35,5 +37,14 @@ TEST(VESCCommandScheduler, SkipsUnselectedMotors)
     EXPECT_EQ(AP_VESC_CommandSchedulerTest::next_selected_motor(mask, 4), 2);
     EXPECT_EQ(AP_VESC_CommandSchedulerTest::next_selected_motor(0, 0), -1);
 }
+
+#else
+
+TEST(VESCCommandScheduler, RequiresVESC)
+{
+    GTEST_SKIP() << "requires AP_VESC_ENABLED";
+}
+
+#endif
 
 AP_GTEST_MAIN()
