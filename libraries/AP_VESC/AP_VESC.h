@@ -75,6 +75,7 @@ public:
 
 private:
     friend class AP_VESC_SocketCANReceiveTest;
+    friend class AP_VESC_CommandSchedulerTest;
 
     void loop();
     void send_commands();
@@ -85,6 +86,7 @@ private:
 
     int8_t motor_for_controller_id(uint8_t controller_id) const;
     bool motor_is_selected(uint8_t motor) const;
+    static int8_t next_selected_motor(uint16_t mask, uint8_t start_motor);
 
     AP_HAL::CANIface *_can_iface = nullptr;
     HAL_BinarySemaphore _event_sem;
@@ -109,6 +111,7 @@ private:
     bool _zero_flush_complete = true;
     uint32_t _disarm_flush_start_ms = 0;
     uint16_t _zero_flush_success_mask = 0;
+    uint8_t _next_command_motor = 0;
     Mode _active_mode = Mode::PPM;
     AP_VESC_Protocol::Protocol _active_protocol = AP_VESC_Protocol::Protocol::STANDARD;
 

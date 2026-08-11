@@ -415,6 +415,17 @@ int8_t AP_VESC::motor_for_controller_id(const uint8_t controller_id) const
     return -1;
 }
 
+int8_t AP_VESC::next_selected_motor(const uint16_t mask, const uint8_t start_motor)
+{
+    for (uint8_t offset = 0; offset < MAX_ESC; offset++) {
+        const uint8_t motor = (start_motor + offset) % MAX_ESC;
+        if ((mask & (1U << motor)) != 0) {
+            return motor;
+        }
+    }
+    return -1;
+}
+
 void AP_VESC::update()
 {
     if (!AP_VESC_Protocol::can_command_mode(uint8_t(mode()))) {
@@ -436,15 +447,14 @@ void AP_VESC::update()
 
         const SRV_Channel::Function function = SRV_Channels::get_motor_function(motor);
         uint8_t channel;
-        if (SRV_Channels::find_channel(function, channel)) {
-            hal.rcout->write(channel, pwm_mid);
-        }
-        if (!outputs_enabled) {
+        if (!SRV_Channels::find_channel(function, channel)) {
             continue;
         }
 
         uint16_t pwm = 0;
-        if (SRV_Channels::get_output_pwm(function, pwm)) {
+        const bool have_output = SRV_Channels::get_output_pwm_chan(channel, pwm);
+        hal.rcout->write(channel, pwm_mid);
+        if (outputs_enabled && have_output) {
             _command_erpm[motor] = AP_VESC_Protocol::pwm_to_erpm(pwm,
                                    pwm_min,
                                    pwm_mid,
@@ -563,32 +573,33 @@ void AP_VESC::send_commands()
         memset(command_erpm, 0, sizeof(command_erpm));
     }
 
-    for (uint8_t motor = 0; motor < MAX_ESC; motor++) {
-        // When disarmed, only address controllers which have recently announced
-        // themselves. This avoids filling an unpowered CAN bus with failed TX.
-        const bool should_send = (armed || flushing) ? (expected & (1U << motor)) != 0 :
-                                                       (present & (1U << motor)) != 0;
-        if (!should_send) {
-            continue;
-        }
+    // When disarmed, only address controllers which have recently announced
+    // themselves. This avoids filling an unpowered CAN bus with failed TX.
+    const uint16_t send_mask = (armed || flushing) ? expected : present;
+    // Queue one frame per scheduler slot. Bursting the whole mask can leave
+    // higher controller IDs behind lower-ID frames in priority-ordered queues.
+    const int8_t motor = next_selected_motor(send_mask, _next_command_motor);
+    if (motor < 0) {
+        return;
+    }
+    _next_command_motor = (motor + 1) % MAX_ESC;
 
-        const int16_t configured_id = _controller_id[motor].get();
-        if (configured_id < 0 || configured_id > AP_VESC_Protocol::MAX_CONTROLLER_ID) {
-            _tx_error_count++;
-            continue;
-        }
+    const int16_t configured_id = _controller_id[motor].get();
+    if (configured_id < 0 || configured_id > AP_VESC_Protocol::MAX_CONTROLLER_ID) {
+        _tx_error_count++;
+        return;
+    }
 
-        AP_HAL::CANFrame frame;
-        const uint8_t controller_id = uint8_t(configured_id);
-        if (!AP_VESC_Protocol::make_set_rpm_frame(controller_id, command_erpm[motor], frame) ||
-            !write_frame(frame, 1000)) {
-            _tx_error_count++;
-            _last_tx_failure_ms = now_ms;
-        } else {
-            _last_tx_success_ms = now_ms;
-            if (flushing && command_erpm[motor] == 0) {
-                _zero_flush_success_mask |= 1U << motor;
-            }
+    AP_HAL::CANFrame frame;
+    const uint8_t controller_id = uint8_t(configured_id);
+    if (!AP_VESC_Protocol::make_set_rpm_frame(controller_id, command_erpm[motor], frame) ||
+        !write_frame(frame, 1000)) {
+        _tx_error_count++;
+        _last_tx_failure_ms = now_ms;
+    } else {
+        _last_tx_success_ms = now_ms;
+        if (flushing && command_erpm[motor] == 0) {
+            _zero_flush_success_mask |= 1U << motor;
         }
     }
 }
@@ -700,23 +711,35 @@ void AP_VESC::handle_frame(const AP_HAL::CANFrame &frame)
 
 void AP_VESC::loop()
 {
-    uint32_t last_tx_ms = 0;
+    uint64_t next_tx_us = AP_HAL::micros64();
     while (true) {
         const uint16_t output_rate_hz = constrain_int16(_output_rate_hz.get(),
                                         VESC_OUTPUT_RATE_MIN_HZ,
                                         VESC_OUTPUT_RATE_MAX_HZ);
-        const uint32_t interval_ms = MAX(1U, 1000U / output_rate_hz);
-        const uint32_t now_ms = AP_HAL::millis();
-        if (now_ms - last_tx_ms >= interval_ms) {
-            last_tx_ms = now_ms;
+        const uint16_t expected = expected_mask();
+        const uint16_t send_mask = (hal.util->get_soft_armed() || !_zero_flush_complete) ?
+                                   expected : present_mask();
+        const uint8_t selected_count = __builtin_popcount(send_mask);
+        const uint32_t aggregate_rate_hz = output_rate_hz * MAX(1U, selected_count);
+        const uint32_t interval_us = MAX(1U, 1000000U / aggregate_rate_hz);
+        const uint64_t now_us = AP_HAL::micros64();
+        if (now_us >= next_tx_us) {
             send_commands();
+            next_tx_us += interval_us;
+            if (now_us >= next_tx_us) {
+                next_tx_us = now_us + interval_us;
+            }
         }
 
         AP_HAL::CANFrame frame;
         while (read_frame(frame)) {
             handle_frame(frame);
         }
-        hal.scheduler->delay_microseconds(1000);
+
+        const uint64_t wait_start_us = AP_HAL::micros64();
+        const uint32_t wait_us = next_tx_us > wait_start_us ?
+                                 MIN(1000U, uint32_t(next_tx_us - wait_start_us)) : 1U;
+        IGNORE_RETURN(_event_sem.wait(wait_us));
     }
 }
 
