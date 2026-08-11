@@ -26,7 +26,7 @@
 #include <AP_Logger/AP_Logger.h>
 #include <AP_KDECAN/AP_KDECAN.h>
 
-#if HAL_MAX_CAN_PROTOCOL_DRIVERS
+#if HAL_CANMANAGER_ENABLED
   #include <AP_CANManager/AP_CANManager.h>
   #include <AP_DroneCAN/AP_DroneCAN.h>
   #include <AP_PiccoloCAN/AP_PiccoloCAN.h>
@@ -486,6 +486,7 @@ void SRV_Channels::cork()
  */
 void SRV_Channels::push()
 {
+#if HAL_CANMANAGER_ENABLED
 #if AP_VESC_ENABLED
     // VESC snapshots the mixed PWM values, then overwrites selected physical
     // outputs with neutral before the HAL pushes them to the pins.
@@ -495,6 +496,7 @@ void SRV_Channels::push()
             vesc->update();
         }
     }
+#endif
 #endif
 
     hal.rcout->push();
@@ -529,7 +531,7 @@ void SRV_Channels::push()
     }
 #endif
 
-#if HAL_MAX_CAN_PROTOCOL_DRIVERS
+#if HAL_CANMANAGER_ENABLED
     // push outputs to CAN
     uint8_t can_num_drivers = AP::can().get_num_drivers();
     for (uint8_t i = 0; i < can_num_drivers; i++) {
@@ -564,7 +566,7 @@ void SRV_Channels::push()
                 break;
         }
     }
-#endif // HAL_MAX_CAN_PROTOCOL_DRIVERS
+#endif // HAL_CANMANAGER_ENABLED
 }
 
 void SRV_Channels::zero_rc_outputs()
