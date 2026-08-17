@@ -24,6 +24,7 @@
 #include <AP_HAL/AP_HAL.h>
 
 #include <AP_Param/AP_Param.h>
+#include <AP_VESC/AP_VESC_config.h>
 #include "AP_SLCANIface.h"
 #include "AP_CANDriver.h"
 
@@ -146,6 +147,9 @@ private:
         AP_Int8 _driver_type_11bit;
         AP_CANDriver* _uavcan;
         AP_CANDriver* _piccolocan;
+#if AP_VESC_ENABLED
+        AP_CANDriver* _vesc;
+#endif
     };
 
     CANIface_Params _interfaces[HAL_NUM_CAN_IFACES];

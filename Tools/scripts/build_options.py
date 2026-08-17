@@ -148,6 +148,7 @@ BUILD_OPTIONS = [
     Feature('VTX', 'TRAMP', 'AP_TRAMP_ENABLED', 'Enable IRC Tramp VTX control', 0, "VIDEO_TX"),
 
     Feature('ESC', 'PICCOLOCAN', 'AP_PICCOLOCAN_ENABLED', 'Enable PiccoloCAN', 0, 'DroneCAN'),
+    Feature('ESC', 'VESC_CAN', 'AP_VESC_ENABLED', 'Enable VESC CAN RPM control', 0, None),
     Feature('ESC', 'TORQEEDO', 'HAL_TORQEEDO_ENABLED', 'Enable Torqeedo motors', 0, None),
 
     Feature('ESC', 'ESC_TELEM', 'HAL_WITH_ESC_TELEM', 'Enable ESC telemetry', 0, None),

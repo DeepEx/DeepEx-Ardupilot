@@ -337,16 +337,16 @@ int CANIface::_read(AP_HAL::CANFrame& frame, uint64_t& timestamp_us, bool& loopb
 
     const int res = recvmsg(_fd, &msg, MSG_DONTWAIT);
     if (res <= 0) {
-        return (res < 0 && errno == EWOULDBLOCK) ? 0 : res;
+        return (res < 0 && (errno == EWOULDBLOCK || errno == EAGAIN)) ? 0 : res;
+    }
+    if (res != sizeof(sockcan_frame) || (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) != 0 ||
+        sockcan_frame.can_dlc > CAN_MAX_DLEN) {
+        return -1;
     }
     /*
      * Flags
      */
     loopback = (msg.msg_flags & static_cast<int>(MSG_CONFIRM)) != 0;
-
-    if (!loopback) {
-        return 0;
-    }
 
     frame = makeUavcanFrame(sockcan_frame);
     /*

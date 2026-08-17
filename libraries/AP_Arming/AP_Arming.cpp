@@ -68,6 +68,7 @@
 
   #include <AP_PiccoloCAN/AP_PiccoloCAN.h>
   #include <AP_DroneCAN/AP_DroneCAN.h>
+  #include <AP_VESC/AP_VESC.h>
 #endif
 
 #include <AP_Logger/AP_Logger.h>
@@ -1342,6 +1343,19 @@ bool AP_Arming::can_checks(bool report)
                         check_failed(Check::SYSTEM, report, "DroneCAN: %s", fail_msg);
                         return false;
                     }
+#endif
+                    break;
+                }
+                case AP_CAN::Protocol::VESC: {
+#if AP_VESC_ENABLED
+                    AP_VESC *vesc = AP_VESC::get_vesc(i);
+                    if (vesc != nullptr && !vesc->pre_arm_check(fail_msg, ARRAY_SIZE(fail_msg))) {
+                        check_failed(Check::SYSTEM, report, "VESC: %s", fail_msg);
+                        return false;
+                    }
+#else
+                    check_failed(Check::SYSTEM, report, "VESC not enabled");
+                    return false;
 #endif
                     break;
                 }

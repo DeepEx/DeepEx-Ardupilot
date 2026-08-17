@@ -4,6 +4,8 @@
 #include <AP_RPM/AP_RPM_config.h>
 #include <AP_RangeFinder/AP_RangeFinder.h>
 #include <AP_RangeFinder/AP_RangeFinder_Backend.h>
+#include <AP_CANManager/AP_CANManager.h>
+#include <AP_VESC/AP_VESC.h>
 
 MAV_TYPE GCS_Sub::frame_type() const
 {
@@ -190,6 +192,59 @@ bool GCS_MAVLINK_Sub::send_info()
 
     CHECK_PAYLOAD_SIZE(NAMED_VALUE_FLOAT);
     send_named_float("RFTarget", sub.mode_surftrak.get_rangefinder_target_cm() * 0.01f);
+
+#if AP_VESC_ENABLED
+    static constexpr char vesc_v1_name[10] = "VESC_V1";
+    for (uint8_t i = 0; i < AP::can().get_num_drivers(); i++) {
+        AP_VESC *vesc = AP_VESC::get_vesc(i);
+        if (vesc == nullptr) {
+            continue;
+        }
+
+        const uint16_t expected = vesc->expected_mask();
+        const uint16_t present = vesc->present_mask();
+        CHECK_PAYLOAD_SIZE(NAMED_VALUE_INT);
+        send_named_int("VESC_STATE", int32_t(vesc->readiness_state()));
+        CHECK_PAYLOAD_SIZE(NAMED_VALUE_INT);
+        send_named_int("VESC_MODE", int32_t(vesc->mode()));
+        CHECK_PAYLOAD_SIZE(NAMED_VALUE_INT);
+        send_named_int("VESC_PROTO", int32_t(vesc->protocol()));
+        CHECK_PAYLOAD_SIZE(NAMED_VALUE_INT);
+        send_named_int("VESC_EXP", expected);
+        CHECK_PAYLOAD_SIZE(NAMED_VALUE_INT);
+        send_named_int("VESC_PRES", present);
+        CHECK_PAYLOAD_SIZE(NAMED_VALUE_INT);
+        send_named_int("VESC_MISS", expected & ~present);
+        CHECK_PAYLOAD_SIZE(NAMED_VALUE_INT);
+        send_named_int("VESC_SAFE", vesc->zero_flush_complete() ? 1 : 0);
+        CHECK_PAYLOAD_SIZE(NAMED_VALUE_INT);
+        send_named_int("VESC_DIAG", vesc->diagnostic_flags());
+        CHECK_PAYLOAD_SIZE(NAMED_VALUE_INT);
+        send_named_int("VESC_FLT", vesc->fault_mask());
+
+        // Versioned extension for fields that cannot be represented without
+        // overloading ESC_TELEMETRY. One selected motor is sent per INFO cycle.
+        static uint8_t next_motor;
+        for (uint8_t offset = 0; offset < AP_VESC::MAX_ESC; offset++) {
+            const uint8_t motor = (next_motor + offset) % AP_VESC::MAX_ESC;
+            AP_VESC::ControllerState state {};
+            if (!vesc->get_controller_state(motor, state)) {
+                continue;
+            }
+            next_motor = (motor + 1) % AP_VESC::MAX_ESC;
+            float data[AP_VESC_Protocol::MAVLINK_EXTENSION_LENGTH] {};
+            AP_VESC_Protocol::pack_mavlink_extension(state, data);
+            CHECK_PAYLOAD_SIZE(DEBUG_FLOAT_ARRAY);
+            mavlink_msg_debug_float_array_send(chan,
+                                               AP_HAL::micros64(),
+                                               vesc_v1_name,
+                                               state.motor_number,
+                                               data);
+            break;
+        }
+        break;
+    }
+#endif
 
     return true;
 }
