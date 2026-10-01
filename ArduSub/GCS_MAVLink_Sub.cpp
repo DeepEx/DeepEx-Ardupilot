@@ -224,23 +224,21 @@ bool GCS_MAVLINK_Sub::send_info()
 
         // Versioned extension for fields that cannot be represented without
         // overloading ESC_TELEMETRY. One selected motor is sent per INFO cycle.
-        static uint8_t next_motor;
-        for (uint8_t offset = 0; offset < AP_VESC::MAX_ESC; offset++) {
-            const uint8_t motor = (next_motor + offset) % AP_VESC::MAX_ESC;
+        // next_vesc_motor is per-channel (a member of this GCS_MAVLINK_Sub
+        // instance) so each link independently cycles through every motor.
+        uint8_t motor;
+        if (AP_VESC_Protocol::select_next_motor(next_vesc_motor, expected, AP_VESC::MAX_ESC, motor)) {
             AP_VESC::ControllerState state {};
-            if (!vesc->get_controller_state(motor, state)) {
-                continue;
+            if (vesc->get_controller_state(motor, state)) {
+                float data[AP_VESC_Protocol::MAVLINK_EXTENSION_LENGTH] {};
+                AP_VESC_Protocol::pack_mavlink_extension(state, data);
+                CHECK_PAYLOAD_SIZE(DEBUG_FLOAT_ARRAY);
+                mavlink_msg_debug_float_array_send(chan,
+                                                   AP_HAL::micros64(),
+                                                   vesc_v1_name,
+                                                   state.motor_number,
+                                                   data);
             }
-            next_motor = (motor + 1) % AP_VESC::MAX_ESC;
-            float data[AP_VESC_Protocol::MAVLINK_EXTENSION_LENGTH] {};
-            AP_VESC_Protocol::pack_mavlink_extension(state, data);
-            CHECK_PAYLOAD_SIZE(DEBUG_FLOAT_ARRAY);
-            mavlink_msg_debug_float_array_send(chan,
-                                               AP_HAL::micros64(),
-                                               vesc_v1_name,
-                                               state.motor_number,
-                                               data);
-            break;
         }
         break;
     }
