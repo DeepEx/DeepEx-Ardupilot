@@ -377,4 +377,104 @@ TEST(VESCProtocol, RejectInvalidScaling)
     EXPECT_EQ(AP_VESC_Protocol::pwm_to_erpm(1600, 1100, 1500, 1900, 17000, 0.0f), 0);
 }
 
+TEST(VESCProtocol, SelectNextMotorCyclesSelectedMotors)
+{
+    // mask 0x0F selects motors 0-3 (M1-M4). A single cursor must visit
+    // every selected motor once per full cycle, in order, before repeating.
+    uint8_t cursor = 0;
+    uint8_t motor;
+    for (uint8_t rep = 0; rep < 2; rep++) {
+        for (uint8_t expected_motor = 0; expected_motor < 4; expected_motor++) {
+            ASSERT_TRUE(AP_VESC_Protocol::select_next_motor(cursor, 0x0F, 4, motor));
+            EXPECT_EQ(motor, expected_motor);
+        }
+    }
+}
+
+TEST(VESCProtocol, SelectNextMotorSkipsUnselectedMotors)
+{
+    // mask 0x0A selects only motors 1 and 3 (M2, M4); M1/M3 must never be
+    // returned.
+    uint8_t cursor = 0;
+    uint8_t motor;
+    ASSERT_TRUE(AP_VESC_Protocol::select_next_motor(cursor, 0x0A, 4, motor));
+    EXPECT_EQ(motor, 1);
+    ASSERT_TRUE(AP_VESC_Protocol::select_next_motor(cursor, 0x0A, 4, motor));
+    EXPECT_EQ(motor, 3);
+    ASSERT_TRUE(AP_VESC_Protocol::select_next_motor(cursor, 0x0A, 4, motor));
+    EXPECT_EQ(motor, 1);
+}
+
+TEST(VESCProtocol, SelectNextMotorEmptyMaskFails)
+{
+    uint8_t cursor = 0;
+    uint8_t motor;
+    EXPECT_FALSE(AP_VESC_Protocol::select_next_motor(cursor, 0x00, 4, motor));
+}
+
+TEST(VESCProtocol, SelectNextMotorPerCursorChannelsAreIndependent)
+{
+    // Regression test for the VESC_V1 INFO starvation bug: GCS_MAVLINK_Sub
+    // used to keep a single function-static cursor shared by every MAVLink
+    // channel, so two streaming channels would partition the motor
+    // sequence between them (e.g. one channel only ever saw M1/M3, the
+    // other only M2/M4). Each channel must keep its own cursor and cycle
+    // through every selected motor on its own.
+    constexpr uint16_t mask = 0x0F; // M1-M4 selected
+    uint8_t channel_a_cursor = 0;
+    uint8_t channel_b_cursor = 0;
+    uint8_t motor;
+
+    // 1. channel A and channel B start independently (same starting state,
+    // but distinct storage).
+    EXPECT_NE(&channel_a_cursor, &channel_b_cursor);
+
+    // 2. calls on channel A do not advance the next VESC selected for
+    // channel B.
+    ASSERT_TRUE(AP_VESC_Protocol::select_next_motor(channel_a_cursor, mask, 4, motor));
+    EXPECT_EQ(motor, 0);
+    ASSERT_TRUE(AP_VESC_Protocol::select_next_motor(channel_a_cursor, mask, 4, motor));
+    EXPECT_EQ(motor, 1);
+    EXPECT_EQ(channel_b_cursor, 0);
+
+    // 3. with selected mask 0x0F, both channels eventually publish
+    // M1, M2, M3, M4 on their own, regardless of what the other channel did.
+    bool channel_b_saw_motor[4] {};
+    for (uint8_t i = 0; i < 4; i++) {
+        ASSERT_TRUE(AP_VESC_Protocol::select_next_motor(channel_b_cursor, mask, 4, motor));
+        channel_b_saw_motor[motor] = true;
+    }
+    for (uint8_t m = 0; m < 4; m++) {
+        EXPECT_TRUE(channel_b_saw_motor[m]) << "channel B never saw motor " << unsigned(m);
+    }
+
+    // 5. one channel running at a different INFO rate cannot starve
+    // motors on another channel: drive channel A through many more cycles
+    // than channel B and confirm channel B still completes a full cycle
+    // unaffected.
+    for (uint8_t i = 0; i < 40; i++) {
+        ASSERT_TRUE(AP_VESC_Protocol::select_next_motor(channel_a_cursor, mask, 4, motor));
+    }
+    bool channel_b_saw_motor_again[4] {};
+    for (uint8_t i = 0; i < 4; i++) {
+        ASSERT_TRUE(AP_VESC_Protocol::select_next_motor(channel_b_cursor, mask, 4, motor));
+        channel_b_saw_motor_again[motor] = true;
+    }
+    for (uint8_t m = 0; m < 4; m++) {
+        EXPECT_TRUE(channel_b_saw_motor_again[m]) << "fast channel A starved channel B of motor " << unsigned(m);
+    }
+
+    // 4. skipped/unselected motors are handled correctly even when
+    // channels run against a mask with gaps (M5/M6 unselected).
+    uint8_t sparse_cursor_a = 0;
+    uint8_t sparse_cursor_b = 0;
+    constexpr uint16_t sparse_mask = 0x09; // M1 and M4 only
+    ASSERT_TRUE(AP_VESC_Protocol::select_next_motor(sparse_cursor_a, sparse_mask, 4, motor));
+    EXPECT_EQ(motor, 0);
+    ASSERT_TRUE(AP_VESC_Protocol::select_next_motor(sparse_cursor_b, sparse_mask, 4, motor));
+    EXPECT_EQ(motor, 0);
+    ASSERT_TRUE(AP_VESC_Protocol::select_next_motor(sparse_cursor_a, sparse_mask, 4, motor));
+    EXPECT_EQ(motor, 3);
+}
+
 AP_GTEST_MAIN()

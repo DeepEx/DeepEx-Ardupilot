@@ -175,6 +175,18 @@ ConfigurationResult validate_configuration(uint16_t mask,
                                            const int16_t *controller_ids,
                                            const bool *function_assigned,
                                            uint8_t motor_count);
+
+// Round-robin motor selection. Finds the next motor (0-based) whose bit is
+// set in mask, searching forward from *cursor (inclusive) and wrapping
+// after `count` motors. On success advances *cursor to one past the
+// selected motor (mod count) and returns true with motor set; returns
+// false if mask has no bit set among the first `count` motors.
+//
+// This is a pure function with no shared/static state: a caller that needs
+// several independent iterations over the same mask (e.g. one per MAVLink
+// channel) keeps its own cursor variable and the sequences never interfere
+// with each other.
+bool select_next_motor(uint8_t &cursor, uint16_t mask, uint8_t count, uint8_t &motor);
 uint16_t freshness_flags(const ControllerState &state);
 void pack_mavlink_extension(const ControllerState &state,
                             float (&data)[MAVLINK_EXTENSION_LENGTH]);

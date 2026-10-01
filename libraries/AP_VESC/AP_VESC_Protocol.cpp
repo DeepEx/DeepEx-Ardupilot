@@ -265,6 +265,20 @@ ConfigurationResult validate_configuration(const uint16_t mask,
     return { ConfigurationError::NONE, 0, 0 };
 }
 
+bool select_next_motor(uint8_t &cursor, const uint16_t mask, const uint8_t count, uint8_t &motor)
+{
+    for (uint8_t offset = 0; offset < count; offset++) {
+        const uint8_t candidate = (cursor + offset) % count;
+        if ((mask & (1U << candidate)) == 0) {
+            continue;
+        }
+        motor = candidate;
+        cursor = (candidate + 1) % count;
+        return true;
+    }
+    return false;
+}
+
 uint16_t freshness_flags(const ControllerState &state)
 {
     uint16_t flags = 0;
