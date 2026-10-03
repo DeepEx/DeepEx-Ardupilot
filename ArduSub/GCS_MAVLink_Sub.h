@@ -1,6 +1,7 @@
 #pragma once
 
 #include <GCS_MAVLink/GCS.h>
+#include <AP_VESC/AP_VESC_config.h>
 
 class GCS_MAVLINK_Sub : public GCS_MAVLINK {
 
@@ -47,6 +48,13 @@ private:
     bool try_send_message(enum ap_message id) override;
 
     bool send_info(void);
+
+#if AP_VESC_ENABLED
+    // state variable for the last VESC motor we sent a VESC_V1 debug
+    // float array for. Per-channel so each GCS link independently
+    // cycles through every selected motor.
+    uint8_t next_vesc_motor;
+#endif // AP_VESC_ENABLED
 
     uint8_t base_mode() const override;
     MAV_STATE vehicle_system_status() const override;

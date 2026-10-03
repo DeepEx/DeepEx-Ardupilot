@@ -26,10 +26,11 @@
 #include <AP_Logger/AP_Logger.h>
 #include <AP_KDECAN/AP_KDECAN.h>
 
-#if HAL_MAX_CAN_PROTOCOL_DRIVERS
+#if HAL_CANMANAGER_ENABLED
   #include <AP_CANManager/AP_CANManager.h>
   #include <AP_DroneCAN/AP_DroneCAN.h>
   #include <AP_PiccoloCAN/AP_PiccoloCAN.h>
+  #include <AP_VESC/AP_VESC.h>
 #endif
 
 #if NUM_SERVO_CHANNELS == 0
@@ -485,6 +486,19 @@ void SRV_Channels::cork()
  */
 void SRV_Channels::push()
 {
+#if HAL_CANMANAGER_ENABLED
+#if AP_VESC_ENABLED
+    // VESC snapshots the mixed PWM values, then overwrites selected physical
+    // outputs with neutral before the HAL pushes them to the pins.
+    for (uint8_t i = 0; i < AP::can().get_num_drivers(); i++) {
+        AP_VESC *vesc = AP_VESC::get_vesc(i);
+        if (vesc != nullptr) {
+            vesc->update();
+        }
+    }
+#endif
+#endif
+
     hal.rcout->push();
 
 #if AP_VOLZ_ENABLED
@@ -517,11 +531,12 @@ void SRV_Channels::push()
     }
 #endif
 
-#if HAL_ENABLE_DRONECAN_DRIVERS
+#if HAL_CANMANAGER_ENABLED
     // push outputs to CAN
     uint8_t can_num_drivers = AP::can().get_num_drivers();
     for (uint8_t i = 0; i < can_num_drivers; i++) {
         switch (AP::can().get_driver_type(i)) {
+#if HAL_ENABLE_DRONECAN_DRIVERS
             case AP_CAN::Protocol::DroneCAN: {
                 AP_DroneCAN *ap_dronecan = AP_DroneCAN::get_dronecan(i);
                 if (ap_dronecan == nullptr) {
@@ -530,6 +545,7 @@ void SRV_Channels::push()
                 ap_dronecan->SRV_push_servos();
                 break;
             }
+#endif
 #if AP_PICCOLOCAN_ENABLED
             case AP_CAN::Protocol::PiccoloCAN: {
                 AP_PiccoloCAN *ap_pcan = AP_PiccoloCAN::get_pcan(i);
@@ -540,12 +556,17 @@ void SRV_Channels::push()
                 break;
             }
 #endif
+#if AP_VESC_ENABLED
+            case AP_CAN::Protocol::VESC: {
+                break;
+            }
+#endif
             case AP_CAN::Protocol::None:
             default:
                 break;
         }
     }
-#endif // HAL_NUM_CAN_IFACES
+#endif // HAL_CANMANAGER_ENABLED
 }
 
 void SRV_Channels::zero_rc_outputs()

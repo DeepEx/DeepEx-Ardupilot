@@ -28,6 +28,7 @@
 #include <AP_KDECAN/AP_KDECAN.h>
 #include <AP_SerialManager/AP_SerialManager.h>
 #include <AP_PiccoloCAN/AP_PiccoloCAN.h>
+#include <AP_VESC/AP_VESC.h>
 #include <AP_EFI/AP_EFI_NWPMU.h>
 #include <GCS_MAVLink/GCS.h>
 #if CONFIG_HAL_BOARD == HAL_BOARD_LINUX
@@ -155,6 +156,20 @@ void AP_CANManager::init()
 
         // Find the driver type that we need to allocate and register this interface with
         drv_type[drv_num] = (AP_CAN::Protocol) _drv_param[drv_num]._driver_type.get();
+#if AP_VESC_ENABLED
+        // VESC must exist even when the Linux interface is absent. This makes
+        // PPM mode independent of can0 and lets CAN mode report a pre-arm
+        // initialization failure instead of silently skipping its checks.
+        if (drv_type[drv_num] == AP_CAN::Protocol::VESC && _drivers[drv_num] == nullptr) {
+            _drivers[drv_num] = _drv_param[drv_num]._vesc = NEW_NOTHROW AP_VESC;
+            if (_drivers[drv_num] == nullptr) {
+                AP_BoardConfig::allocation_error("VESC %d", drv_num + 1);
+                continue;
+            }
+            AP_Param::load_object_from_eeprom((AP_VESC *)_drivers[drv_num], AP_VESC::var_info);
+            _num_drivers++;
+        }
+#endif
         bool can_initialised = false;
         // Check if this interface need hooking up to slcan passthrough
         // instead of a driver
@@ -211,6 +226,12 @@ void AP_CANManager::init()
             }
 
             AP_Param::load_object_from_eeprom((AP_PiccoloCAN*)_drivers[drv_num], AP_PiccoloCAN::var_info);
+            break;
+#endif
+#if AP_VESC_ENABLED
+        case AP_CAN::Protocol::VESC:
+            // Allocated before interface initialization so mode-specific
+            // pre-arm checks still run when can0 is missing.
             break;
 #endif
         default:

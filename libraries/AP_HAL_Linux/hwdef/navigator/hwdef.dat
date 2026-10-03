@@ -1,5 +1,8 @@
 # BlueRobotics Navigator
 
+env WITH_CAN 1
+define HAL_NUM_CAN_IFACES 1
+
 # IMUs:
 IMU Invensense SPI:icm20602 ROTATION_ROLL_180_YAW_270
 IMU LSM6DSV SPI:lsm6dsv ROTATION_YAW_270
