@@ -217,6 +217,41 @@ bool allow_nonzero_command(const CommandConditions &conditions)
            conditions.all_controllers_ready;
 }
 
+uint16_t block_reasons(const CommandConditions &conditions)
+{
+    uint16_t reasons = 0;
+    if (!conditions.armed) {
+        reasons |= BLOCK_DISARMED;
+    }
+    if (conditions.emergency_stop) {
+        reasons |= BLOCK_EMERGENCY_STOP;
+    }
+    if (!conditions.command_fresh) {
+        reasons |= BLOCK_COMMAND_STALE;
+    }
+    if (!conditions.interface_available) {
+        reasons |= BLOCK_NO_INTERFACE;
+    }
+    if (conditions.interface_down) {
+        reasons |= BLOCK_BUS_OFF;
+    }
+    if (!conditions.tx_healthy) {
+        reasons |= BLOCK_TX_UNHEALTHY;
+    }
+    if (!conditions.all_controllers_ready) {
+        reasons |= BLOCK_NOT_READY;
+    }
+    return reasons;
+}
+
+bool log_record_due(const uint32_t now_ms,
+                    const uint32_t last_logged_ms,
+                    const uint32_t interval_ms,
+                    const bool state_changed)
+{
+    return state_changed || last_logged_ms == 0 || now_ms - last_logged_ms >= interval_ms;
+}
+
 int32_t safe_command_erpm(const int32_t requested_erpm, const CommandConditions &conditions)
 {
     return allow_nonzero_command(conditions) ? requested_erpm : 0;

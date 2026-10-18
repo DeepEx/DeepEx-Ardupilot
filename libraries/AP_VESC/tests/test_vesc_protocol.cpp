@@ -477,4 +477,70 @@ TEST(VESCProtocol, SelectNextMotorPerCursorChannelsAreIndependent)
     EXPECT_EQ(motor, 3);
 }
 
+
+TEST(VESCProtocol, BlockReasons)
+{
+    AP_VESC_Protocol::CommandConditions conditions {
+        true, false, true, true, false, true, true,
+    };
+    EXPECT_EQ(AP_VESC_Protocol::block_reasons(conditions), 0);
+    EXPECT_TRUE(AP_VESC_Protocol::allow_nonzero_command(conditions));
+
+    conditions.armed = false;
+    EXPECT_EQ(AP_VESC_Protocol::block_reasons(conditions), AP_VESC_Protocol::BLOCK_DISARMED);
+    conditions.armed = true;
+    conditions.emergency_stop = true;
+    EXPECT_EQ(AP_VESC_Protocol::block_reasons(conditions), AP_VESC_Protocol::BLOCK_EMERGENCY_STOP);
+    conditions.emergency_stop = false;
+    conditions.command_fresh = false;
+    EXPECT_EQ(AP_VESC_Protocol::block_reasons(conditions), AP_VESC_Protocol::BLOCK_COMMAND_STALE);
+    conditions.command_fresh = true;
+    conditions.interface_available = false;
+    EXPECT_EQ(AP_VESC_Protocol::block_reasons(conditions), AP_VESC_Protocol::BLOCK_NO_INTERFACE);
+    conditions.interface_available = true;
+    conditions.interface_down = true;
+    EXPECT_EQ(AP_VESC_Protocol::block_reasons(conditions), AP_VESC_Protocol::BLOCK_BUS_OFF);
+    conditions.interface_down = false;
+    conditions.tx_healthy = false;
+    EXPECT_EQ(AP_VESC_Protocol::block_reasons(conditions), AP_VESC_Protocol::BLOCK_TX_UNHEALTHY);
+    conditions.tx_healthy = true;
+    conditions.all_controllers_ready = false;
+    EXPECT_EQ(AP_VESC_Protocol::block_reasons(conditions), AP_VESC_Protocol::BLOCK_NOT_READY);
+
+    // several reasons accumulate, and gating is consistent with the reasons
+    conditions.armed = false;
+    conditions.tx_healthy = false;
+    EXPECT_EQ(AP_VESC_Protocol::block_reasons(conditions),
+              AP_VESC_Protocol::BLOCK_DISARMED |
+              AP_VESC_Protocol::BLOCK_TX_UNHEALTHY |
+              AP_VESC_Protocol::BLOCK_NOT_READY);
+    EXPECT_EQ(AP_VESC_Protocol::safe_command_erpm(5000, conditions), 0);
+}
+
+TEST(VESCProtocol, LogRecordRateLimit)
+{
+    EXPECT_TRUE(AP_VESC_Protocol::log_record_due(1000, 0, 100, false));
+    EXPECT_FALSE(AP_VESC_Protocol::log_record_due(1099, 1000, 100, false));
+    EXPECT_TRUE(AP_VESC_Protocol::log_record_due(1100, 1000, 100, false));
+    EXPECT_TRUE(AP_VESC_Protocol::log_record_due(1001, 1000, 100, true));
+    // wrap of the millisecond counter
+    EXPECT_FALSE(AP_VESC_Protocol::log_record_due(10, UINT32_MAX - 20, 100, false));
+    EXPECT_TRUE(AP_VESC_Protocol::log_record_due(100, UINT32_MAX - 20, 100, false));
+}
+
+TEST(VESCProtocol, SetRPMFrameMatchesLoggedCommand)
+{
+    // the final command recorded in the log is exactly what is encoded on the bus
+    for (const int32_t erpm : { -17000, -1, 0, 1, 8500, 17000 }) {
+        AP_HAL::CANFrame frame;
+        ASSERT_TRUE(AP_VESC_Protocol::make_set_rpm_frame(3, erpm, frame));
+        const int32_t decoded = int32_t((uint32_t(frame.data[0]) << 24) |
+                                        (uint32_t(frame.data[1]) << 16) |
+                                        (uint32_t(frame.data[2]) << 8) |
+                                        uint32_t(frame.data[3]));
+        EXPECT_EQ(decoded, erpm);
+        EXPECT_EQ(frame.id & AP_HAL::CANFrame::MaskExtID & 0xFF, 3U);
+    }
+}
+
 AP_GTEST_MAIN()

@@ -21,6 +21,7 @@
 
 #include <AP_CANManager/AP_CANDriver.h>
 #include <AP_ESC_Telem/AP_ESC_Telem_Backend.h>
+#include <AP_Logger/AP_Logger_config.h>
 #include <AP_Param/AP_Param.h>
 
 #include "AP_VESC_Protocol.h"
@@ -81,6 +82,12 @@ private:
     void send_commands();
     void handle_frame(const AP_HAL::CANFrame &frame);
 
+#if HAL_LOGGING_ENABLED
+    void log_command(uint8_t motor, uint32_t now_ms, uint16_t pwm, int32_t request_erpm,
+                     int32_t final_erpm, uint16_t block, AP_VESC_Protocol::TxResult tx);
+    void log_summary(uint32_t now_ms);
+#endif
+
     bool write_frame(const AP_HAL::CANFrame &frame, uint32_t timeout_us);
     bool read_frame(AP_HAL::CANFrame &frame);
 
@@ -98,6 +105,8 @@ private:
     char _thread_name[16] {};
 
     int32_t _command_erpm[MAX_ESC] {};
+    int32_t _request_erpm[MAX_ESC] {};
+    uint16_t _request_pwm[MAX_ESC] {};
     uint32_t _last_output_update_ms = 0;
     ControllerState _controller_state[MAX_ESC] {};
     uint32_t _last_external_rx_ms = 0;
@@ -114,6 +123,18 @@ private:
     uint8_t _next_command_motor = 0;
     Mode _active_mode = Mode::PPM;
     AP_VESC_Protocol::Protocol _active_protocol = AP_VESC_Protocol::Protocol::STANDARD;
+
+#if HAL_LOGGING_ENABLED
+    // DataFlash logging state, only touched by the VESC thread
+    uint32_t _log_last_ms[MAX_ESC] {};
+    uint16_t _log_last_block[MAX_ESC] {};
+    uint8_t _log_last_tx[MAX_ESC] {};
+    uint8_t _log_last_state[MAX_ESC] {};
+    uint32_t _log_records = 0;
+    uint32_t _log_suppressed = 0;
+    uint32_t _log_max_us = 0;
+    uint32_t _log_summary_ms = 0;
+#endif
 
     AP_Int16 _esc_mask;
     AP_Int16 _output_rate_hz;

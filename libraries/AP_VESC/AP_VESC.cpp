@@ -22,6 +22,7 @@
 #include <AP_BoardConfig/AP_BoardConfig.h>
 #include <AP_CANManager/AP_CANManager.h>
 #include <AP_HAL/AP_HAL.h>
+#include <AP_Logger/AP_Logger.h>
 #include <AP_Math/AP_Math.h>
 #include <GCS_MAVLink/GCS.h>
 #include <SRV_Channel/SRV_Channel.h>
@@ -31,6 +32,10 @@ extern const AP_HAL::HAL &hal;
 #define VESC_OUTPUT_RATE_MIN_HZ 10
 #define VESC_OUTPUT_RATE_MAX_HZ 200
 #define VESC_OUTPUT_RATE_DEFAULT_HZ 100
+// nominal per-motor DataFlash rate; changes of block reason, TX result or
+// readiness state are logged immediately
+#define VESC_LOG_INTERVAL_MS 100
+#define VESC_LOG_SUMMARY_INTERVAL_MS 1000
 
 const AP_Param::GroupInfo AP_VESC::var_info[] = {
     // @Param: ESC_BM
@@ -441,6 +446,8 @@ void AP_VESC::update()
     WITH_SEMAPHORE(_command_sem);
     for (uint8_t motor = 0; motor < MAX_ESC; motor++) {
         _command_erpm[motor] = 0;
+        _request_erpm[motor] = 0;
+        _request_pwm[motor] = 0;
         if (!motor_is_selected(motor)) {
             continue;
         }
@@ -451,16 +458,21 @@ void AP_VESC::update()
             continue;
         }
 
+        // mixer request, kept for logging before any gating
         uint16_t pwm = 0;
         const bool have_output = SRV_Channels::get_output_pwm_chan(channel, pwm);
         hal.rcout->write(channel, pwm_mid);
-        if (outputs_enabled && have_output) {
-            _command_erpm[motor] = AP_VESC_Protocol::pwm_to_erpm(pwm,
+        if (have_output) {
+            _request_pwm[motor] = pwm;
+            _request_erpm[motor] = AP_VESC_Protocol::pwm_to_erpm(pwm,
                                    pwm_min,
                                    pwm_mid,
                                    pwm_max,
                                    max_erpm,
                                    exponent);
+        }
+        if (outputs_enabled) {
+            _command_erpm[motor] = _request_erpm[motor];
         }
     }
     _last_output_update_ms = AP_HAL::millis();
@@ -500,11 +512,15 @@ void AP_VESC::send_commands()
         return;
     }
     int32_t command_erpm[MAX_ESC] {};
+    int32_t request_erpm[MAX_ESC] {};
+    uint16_t request_pwm[MAX_ESC] {};
     uint32_t last_output_update_ms;
     {
         WITH_SEMAPHORE(_command_sem);
         last_output_update_ms = _last_output_update_ms;
         memcpy(command_erpm, _command_erpm, sizeof(command_erpm));
+        memcpy(request_erpm, _request_erpm, sizeof(request_erpm));
+        memcpy(request_pwm, _request_pwm, sizeof(request_pwm));
     }
 
     const uint32_t now_ms = AP_HAL::millis();
@@ -573,36 +589,141 @@ void AP_VESC::send_commands()
         memset(command_erpm, 0, sizeof(command_erpm));
     }
 
+#if HAL_LOGGING_ENABLED
+    const uint16_t block = AP_VESC_Protocol::block_reasons(command_conditions);
+#endif
+
     // When disarmed, only address controllers which have recently announced
     // themselves. This avoids filling an unpowered CAN bus with failed TX.
     const uint16_t send_mask = (armed || flushing) ? expected : present;
     // Queue one frame per scheduler slot. Bursting the whole mask can leave
     // higher controller IDs behind lower-ID frames in priority-ordered queues.
     const int8_t motor = next_selected_motor(send_mask, _next_command_motor);
-    if (motor < 0) {
-        return;
-    }
-    _next_command_motor = (motor + 1) % MAX_ESC;
+    if (motor >= 0) {
+        _next_command_motor = (motor + 1) % MAX_ESC;
 
-    const int16_t configured_id = _controller_id[motor].get();
-    if (configured_id < 0 || configured_id > AP_VESC_Protocol::MAX_CONTROLLER_ID) {
-        _tx_error_count++;
-        return;
+        AP_VESC_Protocol::TxResult tx = AP_VESC_Protocol::TxResult::BAD_ID;
+        const int16_t configured_id = _controller_id[motor].get();
+        if (configured_id < 0 || configured_id > AP_VESC_Protocol::MAX_CONTROLLER_ID) {
+            _tx_error_count++;
+        } else {
+            AP_HAL::CANFrame frame;
+            const uint8_t controller_id = uint8_t(configured_id);
+            if (!AP_VESC_Protocol::make_set_rpm_frame(controller_id, command_erpm[motor], frame)) {
+                _tx_error_count++;
+                _last_tx_failure_ms = now_ms;
+                tx = AP_VESC_Protocol::TxResult::ENCODE_FAILED;
+            } else if (!write_frame(frame, 1000)) {
+                _tx_error_count++;
+                _last_tx_failure_ms = now_ms;
+                tx = AP_VESC_Protocol::TxResult::REJECTED;
+            } else {
+                _last_tx_success_ms = now_ms;
+                tx = AP_VESC_Protocol::TxResult::ACCEPTED;
+                if (flushing && command_erpm[motor] == 0) {
+                    _zero_flush_success_mask |= 1U << motor;
+                }
+            }
+        }
+#if HAL_LOGGING_ENABLED
+        log_command(motor, now_ms, request_pwm[motor], request_erpm[motor],
+                    command_erpm[motor], block, tx);
+#endif
     }
 
-    AP_HAL::CANFrame frame;
-    const uint8_t controller_id = uint8_t(configured_id);
-    if (!AP_VESC_Protocol::make_set_rpm_frame(controller_id, command_erpm[motor], frame) ||
-        !write_frame(frame, 1000)) {
-        _tx_error_count++;
-        _last_tx_failure_ms = now_ms;
-    } else {
-        _last_tx_success_ms = now_ms;
-        if (flushing && command_erpm[motor] == 0) {
-            _zero_flush_success_mask |= 1U << motor;
+#if HAL_LOGGING_ENABLED
+    // a non-zero request for a controller not addressed in this slot is still logged
+    for (uint8_t other = 0; other < MAX_ESC; other++) {
+        if (other != uint8_t(motor) && (send_mask & (1U << other)) == 0 && request_erpm[other] != 0) {
+            log_command(other, now_ms, request_pwm[other], request_erpm[other],
+                        command_erpm[other], block, AP_VESC_Protocol::TxResult::NOT_ADDRESSED);
         }
     }
+    log_summary(now_ms);
+#endif
 }
+
+#if HAL_LOGGING_ENABLED
+// @LoggerMessage: VESC
+// @Description: VESC CAN SET_RPM command path, one record per motor
+// @Field: TimeUS: Time since system startup
+// @Field: Mot: Logical motor number, 1 to 12
+// @Field: ID: CAN controller ID used in the SET_RPM frame
+// @Field: PWM: Mixer output PWM before conversion, 0 if unavailable
+// @Field: Req: Mixer request converted to signed electrical RPM, before safety gating
+// @Field: Cmd: Final signed electrical RPM placed in the SET_RPM frame, after gating
+// @Field: Blk: Bitmask of gating reasons forcing zero
+// @Field: St: Readiness state
+// @Field: Tx: SET_RPM transmit result
+// @Field: TxE: Cumulative count of failed SET_RPM transmissions
+// @Field: Rx: Electrical RPM reported by the controller in STATUS_1
+// @Field: RxAge: Age of the STATUS_1 telemetry in ms, 65535 if never received
+void AP_VESC::log_command(const uint8_t motor, const uint32_t now_ms, const uint16_t pwm,
+                          const int32_t request_erpm, const int32_t final_erpm,
+                          const uint16_t block, const AP_VESC_Protocol::TxResult tx)
+{
+    AP_Logger *logger = AP_Logger::get_singleton();
+    if (logger == nullptr || !logger->logging_enabled()) {
+        return;
+    }
+    const uint8_t state = uint8_t(_readiness_state);
+    const bool changed = block != _log_last_block[motor] ||
+                         uint8_t(tx) != _log_last_tx[motor] ||
+                         state != _log_last_state[motor];
+    if (!AP_VESC_Protocol::log_record_due(now_ms, _log_last_ms[motor], VESC_LOG_INTERVAL_MS, changed)) {
+        _log_suppressed++;
+        return;
+    }
+    _log_last_ms[motor] = now_ms;
+    _log_last_block[motor] = block;
+    _log_last_tx[motor] = uint8_t(tx);
+    _log_last_state[motor] = state;
+
+    const uint64_t start_us = AP_HAL::micros64();
+    const uint32_t status_ms = _controller_state[motor].last_status1_ms;
+    const uint32_t age_ms = status_ms == 0 ? 65535U : MIN(65535U, now_ms - status_ms);
+    // WriteStreaming drops the record instead of blocking when the buffer is full
+    logger->WriteStreaming("VESC",
+                           "TimeUS,Mot,ID,PWM,Req,Cmd,Blk,St,Tx,TxE,Rx,RxAge",
+                           "s#-Yqq----q-",
+                           "F-----------",
+                           "QBBHiiHBBIiH",
+                           start_us,
+                           uint8_t(motor + 1),
+                           uint8_t(_controller_id[motor].get()),
+                           pwm,
+                           request_erpm,
+                           final_erpm,
+                           block,
+                           state,
+                           uint8_t(tx),
+                           _tx_error_count,
+                           _controller_state[motor].erpm,
+                           uint16_t(age_ms));
+    _log_records++;
+    _log_max_us = MAX(_log_max_us, uint32_t(AP_HAL::micros64() - start_us));
+}
+
+// @LoggerMessage: VESS
+// @Description: VESC DataFlash logging overhead summary, once per second
+// @Field: TimeUS: Time since system startup
+// @Field: Rec: Cumulative VESC records written
+// @Field: Sup: Cumulative VESC records suppressed by the rate limit
+// @Field: MaxUs: Worst-case time spent in one VESC log call
+void AP_VESC::log_summary(const uint32_t now_ms)
+{
+    if (now_ms - _log_summary_ms < VESC_LOG_SUMMARY_INTERVAL_MS) {
+        return;
+    }
+    _log_summary_ms = now_ms;
+    AP_Logger *logger = AP_Logger::get_singleton();
+    if (logger == nullptr || !logger->logging_enabled()) {
+        return;
+    }
+    logger->WriteStreaming("VESS", "TimeUS,Rec,Sup,MaxUs", "s---", "F---", "QIII",
+                           AP_HAL::micros64(), _log_records, _log_suppressed, _log_max_us);
+}
+#endif // HAL_LOGGING_ENABLED
 
 void AP_VESC::handle_frame(const AP_HAL::CANFrame &frame)
 {

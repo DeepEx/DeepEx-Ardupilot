@@ -144,6 +144,27 @@ struct CommandConditions {
     bool all_controllers_ready;
 };
 
+// Reasons for which a non-zero request is forced to zero before transmission.
+// Values are logged in the VESC.Blk field and are a stable log contract.
+enum BlockReason : uint16_t {
+    BLOCK_DISARMED = 1U << 0,
+    BLOCK_EMERGENCY_STOP = 1U << 1,
+    BLOCK_COMMAND_STALE = 1U << 2,
+    BLOCK_NO_INTERFACE = 1U << 3,
+    BLOCK_BUS_OFF = 1U << 4,
+    BLOCK_TX_UNHEALTHY = 1U << 5,
+    BLOCK_NOT_READY = 1U << 6,
+};
+
+// Outcome of the SET_RPM transmission attempt, logged in VESC.Tx.
+enum class TxResult : uint8_t {
+    NOT_ADDRESSED = 0, // controller not addressed in this cycle
+    ACCEPTED = 1,      // frame accepted by the CAN driver (not a bus ACK)
+    REJECTED = 2,      // CAN driver refused or timed out
+    BAD_ID = 3,        // configured controller ID outside 0..254
+    ENCODE_FAILED = 4, // frame could not be built
+};
+
 static constexpr uint8_t MAVLINK_EXTENSION_LENGTH = 58;
 
 bool make_set_rpm_frame(uint8_t controller_id, int32_t erpm, AP_HAL::CANFrame &frame);
@@ -166,6 +187,11 @@ Freshness freshness(uint32_t now_ms,
 bool can_command_mode(uint8_t mode);
 uint16_t physical_pwm(uint8_t mode, uint16_t requested_pwm, uint16_t neutral_pwm);
 bool allow_nonzero_command(const CommandConditions &conditions);
+uint16_t block_reasons(const CommandConditions &conditions);
+bool log_record_due(uint32_t now_ms,
+                    uint32_t last_logged_ms,
+                    uint32_t interval_ms,
+                    bool state_changed);
 int32_t safe_command_erpm(int32_t requested_erpm, const CommandConditions &conditions);
 bool zero_flush_complete(uint16_t expected_mask,
                          uint16_t successful_zero_mask,
