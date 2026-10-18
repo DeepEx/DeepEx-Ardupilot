@@ -386,3 +386,73 @@ while armed.
 This implementation and document were prepared with AI assistance. The human
 submitter remains responsible for understanding, validating, and maintaining
 the change.
+
+## DataFlash command logging
+
+With `VESC_MODE=1` the CAN bridge writes two DataFlash messages from
+`AP_VESC::send_commands()`. Logging is non-blocking (`WriteStreaming` drops a
+record when the logger buffer is full), runs only in the VESC thread, and does
+not change any command, mapping, direction, PID or timing. All other ArduSub
+messages are unchanged. Logging is compiled out when `HAL_LOGGING_ENABLED` is 0.
+
+### VESC (one record per motor)
+
+| Field | Unit | Meaning |
+|---|---|---|
+| TimeUS | us | time since boot |
+| Mot | - | logical motor 1 to 12 (`SERVOn_FUNCTION` Motor1 to Motor12) |
+| ID | - | CAN controller ID used in the SET_RPM frame (`VESC_IDn`) |
+| PWM | PWM us | final mixer output of that motor, 0 if unavailable |
+| Req | eRPM | 1. mixer request: PWM converted with `VESC_IN_*`, `VESC_EXP`, `VESC_MAXRPM`; computed also while disarmed, before any safety gating |
+| Cmd | eRPM | 2. final command placed in the SET_RPM frame, after gating |
+| Blk | bitmask | reasons forcing `Cmd` to 0 (0 = not blocked, see below) |
+| St | enum | readiness: 0 POWERED_OFF, 1 WAITING_TELEMETRY, 2 READY, 3 ARMED, 4 DISARM_FLUSH, 5 FAULT |
+| Tx | enum | 3. SET_RPM result: 0 not addressed, 1 accepted by CAN driver, 2 rejected by driver, 3 invalid controller ID, 4 frame not encoded |
+| TxE | count | cumulative failed SET_RPM transmissions |
+| Rx | eRPM | 4. electrical RPM in the last STATUS_1 received from that controller |
+| RxAge | ms | age of that STATUS_1, 65535 if none received |
+
+`Blk` bits: 1 disarmed, 2 emergency stop, 4 command stale (`VESC_CMD_TO`),
+8 no CAN interface, 16 bus off, 32 recent TX failure, 64 not every selected
+controller has fresh STATUS_1/4/5 and no fault. Several bits can be set.
+
+Semantics and limits:
+
+- `Req` is the mixer request, `Cmd` is what was sent. `Req != Cmd` with
+  `Blk != 0` is a gated command; `Req != Cmd` with `Blk == 0` does not occur.
+- `Tx = 1` means the CAN driver accepted the frame for transmission. It is not
+  a bus acknowledgement; the VESC does not acknowledge SET_RPM. Delivery is
+  confirmed only by `Rx` following `Cmd`.
+- `Rx` is electrical RPM, same unit and sign as `Cmd`. Mechanical RPM is
+  `Rx / VESC_PPAIRS`. The standard `ESC` message carries the same telemetry.
+- A record is written for every addressed controller and for any non-zero
+  request that was not sent. Records are written at most every 100 ms per
+  motor (nominal 10 Hz), and immediately when `Blk`, `Tx` or `St` changes.
+  Short command pulses between two records are therefore not individually
+  visible, but each gating or failure transition is.
+
+### VESS (overhead summary, 1 Hz)
+
+| Field | Meaning |
+|---|---|
+| TimeUS | time since boot, us |
+| Rec | cumulative VESC records written |
+| Sup | cumulative VESC records suppressed by the 100 ms limit |
+| MaxUs | worst-case duration of one VESC log call, us |
+
+### Overhead
+
+A VESC record is 37 bytes including the header. Six motors at 10 Hz is
+2220 B/s, plus a
+23 B VESS record per second. This is the worst case without state changes;
+a transition adds one record per affected motor. `VESS.MaxUs` measures the
+log call time on the target; it has not been measured on Navigator hardware.
+
+### Validation
+
+`libraries/AP_VESC/tests/test_vesc_protocol.cpp` covers the `Blk` mapping,
+rate-limit predicate and SET_RPM payload.
+`Tools/autotest/unittest/vesc_log_unittest.py` takes the message definitions
+from `AP_VESC.cpp`, builds a synthetic `.BIN`, decodes it with pymavlink
+`DFReader`, and checks SET_RPM, record and telemetry consistency for nominal,
+disarmed and TX-failure cases.
