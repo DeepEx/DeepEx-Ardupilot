@@ -456,3 +456,10 @@ rate-limit predicate and SET_RPM payload.
 from `AP_VESC.cpp`, builds a synthetic `.BIN`, decodes it with pymavlink
 `DFReader`, and checks SET_RPM, record and telemetry consistency for nominal,
 disarmed and TX-failure cases.
+
+### Build status
+
+The DataFlash logging code has not been compiled yet. Only the Python decode
+test has been run. Compilation (`waf configure --board navigator64`,
+`waf sub`, and the `AP_VESC` GTest) is pending on a Linux host, to be done from
+the ROV console.
