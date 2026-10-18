@@ -425,8 +425,9 @@ Semantics and limits:
   confirmed only by `Rx` following `Cmd`.
 - `Rx` is electrical RPM, same unit and sign as `Cmd`. Mechanical RPM is
   `Rx / VESC_PPAIRS`. The standard `ESC` message carries the same telemetry.
-- A record is written for every addressed controller and for any non-zero
-  request that was not sent. Records are written at most every 100 ms per
+- The driver addresses one controller per scheduler slot. A record is written
+  for the controller addressed in that slot and for any non-zero request on a
+  controller that was not addressed. Records are written at most every 100 ms per
   motor (nominal 10 Hz), and immediately when `Blk`, `Tx` or `St` changes.
   Short command pulses between two records are therefore not individually
   visible, but each gating or failure transition is.
