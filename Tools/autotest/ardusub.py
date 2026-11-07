@@ -9,6 +9,7 @@ AP_FLAKE8_CLEAN
 
 import os
 import re
+import time
 
 from math import degrees
 from math import radians
@@ -1614,6 +1615,124 @@ class AutoTestSub(vehicle_test_suite.TestSuite):
         self.wait_statustext("Terrain failsafe recovery timeout!")
         self.wait_statustext("Disarming motors")
 
+    def collect_vesc_v1(self, mavs, duration):
+        """collect DEBUG_FLOAT_ARRAY from each connection for duration seconds,
+        timed using the autopilot's own timestamps (so sim speedup is irrelevant)"""
+        for mav in mavs:
+            self.drain_mav(mav)
+        got = [[] for mav in mavs]
+        t0 = None
+        done = False
+        wall_start = time.time()
+        while not done:
+            busy = False
+            for i, mav in enumerate(mavs):
+                m = mav.recv_match(type='DEBUG_FLOAT_ARRAY', blocking=False)
+                if m is None:
+                    continue
+                busy = True
+                t = m.time_usec * 1e-6
+                if t0 is None:
+                    t0 = t
+                if t - t0 >= duration:
+                    done = True
+                    continue
+                got[i].append((t, m))
+            if not busy:
+                time.sleep(0.002)
+                if time.time() - wall_start > max(60, duration * 3):
+                    raise NotAchievedException("Timed out collecting VESC_V1")
+        return got
+
+    def check_vesc_v1_stream(self, msgs, duration, want_total_hz, nmotors=6, tolerance=0.15):
+        """check rate, round-robin order and payload identity of a VESC_V1 stream"""
+        total_hz = len(msgs) / duration
+        self.progress("VESC_V1: %u messages, %.2f Hz (want %.2f)" % (len(msgs), total_hz, want_total_hz))
+        if abs(total_hz - want_total_hz) > want_total_hz * tolerance:
+            raise NotAchievedException("Total rate %.2f Hz, want %.2f Hz" % (total_hz, want_total_hz))
+        last_t = {}
+        max_gap = {}
+        for i, (t, m) in enumerate(msgs):
+            if m.name != "VESC_V1":
+                raise NotAchievedException("Unexpected name %s" % m.name)
+            if len(m.data) != 58:
+                raise NotAchievedException("Unexpected length %u" % len(m.data))
+            if m.data[0] != 1:
+                raise NotAchievedException("Unexpected version %f" % m.data[0])
+            if m.data[1] != m.array_id:
+                raise NotAchievedException("array_id %u != data[1] %f" % (m.array_id, m.data[1]))
+            if not 1 <= m.array_id <= nmotors:
+                raise NotAchievedException("Unexpected motor %u" % m.array_id)
+            if i > 0:
+                prev = msgs[i-1][1].array_id
+                want = prev % nmotors + 1
+                if m.array_id != want:
+                    raise NotAchievedException("Round robin broken: %u after %u" % (m.array_id, prev))
+            if m.array_id in last_t:
+                max_gap[m.array_id] = max(max_gap.get(m.array_id, 0), t - last_t[m.array_id])
+            last_t[m.array_id] = t
+        for motor in range(1, nmotors + 1):
+            count = len([1 for (t, m) in msgs if m.array_id == motor])
+            self.progress("M%u: %u msgs, %.2f Hz, max gap %.3f s" %
+                          (motor, count, count / duration, max_gap.get(motor, 0)))
+            want_hz = want_total_hz / nmotors
+            if abs(count / duration - want_hz) > want_hz * tolerance:
+                raise NotAchievedException("M%u rate %.2f, want %.2f" % (motor, count / duration, want_hz))
+
+    def VescV1Telemetry(self):
+        """VESC_V1 is scheduled as a dedicated 30 Hz round-robin stream"""
+        self.set_parameters({
+            "CAN_P1_DRIVER": 1,
+            "CAN_D1_PROTOCOL": 15,
+        })
+        self.reboot_sitl()
+        # the VESC parameters only exist once the driver is created
+        self.set_parameter("CAN_D1_VE_ESC_BM", 63)
+        self.reboot_sitl()
+        mav2 = mavutil.mavlink_connection(
+            "tcp:localhost:%u" % self.adjust_ardupilot_port(5763),
+            robust_parsing=True,
+            source_system=7,
+            source_component=7,
+            dialect="all",
+        )
+        duration = 120
+
+        self.start_subtest("Default 30 Hz on two channels, no client request")
+        m1, m2 = self.collect_vesc_v1([self.mav, mav2], duration)
+        self.check_vesc_v1_stream(m1, duration, 30)
+        self.check_vesc_v1_stream(m2, duration, 30)
+
+        self.start_subtest("Global VESC states still sent")
+        self.assert_receive_message('NAMED_VALUE_INT', timeout=10,
+                                    condition="NAMED_VALUE_INT.name=='VESC_STATE'")
+
+        self.start_subtest("Request 33333us; same as default")
+        self.set_message_interval('DEBUG_FLOAT_ARRAY', 33333)
+        m1, = self.collect_vesc_v1([self.mav], 30)
+        self.check_vesc_v1_stream(m1, 30, 30)
+
+        self.start_subtest("Request 100ms on one channel only")
+        self.set_message_interval('DEBUG_FLOAT_ARRAY', 100000)
+        m1, m2 = self.collect_vesc_v1([self.mav, mav2], 30)
+        self.check_vesc_v1_stream(m1, 30, 10)
+        self.check_vesc_v1_stream(m2, 30, 30)
+
+        self.start_subtest("Reset to default with 0")
+        self.set_message_interval('DEBUG_FLOAT_ARRAY', 0)
+        m1, = self.collect_vesc_v1([self.mav], 30)
+        self.check_vesc_v1_stream(m1, 30, 30)
+
+        self.start_subtest("Disable with -1")
+        self.set_message_interval('DEBUG_FLOAT_ARRAY', -1)
+        self.delay_sim_time(1, reason='allow in-flight VESC_V1 to drain')
+        self.drain_mav(self.mav)
+        self.assert_not_receive_message('DEBUG_FLOAT_ARRAY', timeout=5)
+        self.set_message_interval('DEBUG_FLOAT_ARRAY', 0)
+
+        self.start_subtest("Other message rates unaffected")
+        self.assert_message_rate_hz('HEARTBEAT', 1, sample_period=10)
+
     def tests(self):
         '''return list of all tests'''
         ret = super(AutoTestSub, self).tests()
@@ -1627,6 +1746,7 @@ class AutoTestSub(vehicle_test_suite.TestSuite):
             self.SimTerrainSurftrak,
             self.SimTerrainMission,
             self.RngfndQuality,
+            self.VescV1Telemetry,
             self.PositionHold,
             self.ModeChanges,
             self.MAV_mgs,
