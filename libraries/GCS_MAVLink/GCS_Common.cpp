@@ -16,6 +16,7 @@
  */
 
 #include "GCS_config.h"
+#include <AP_VESC/AP_VESC_config.h>
 
 #if HAL_GCS_ENABLED
 
@@ -1179,6 +1180,10 @@ ap_message GCS_MAVLINK::mavlink_id_to_ap_message_id(const uint32_t mavlink_id) c
 #endif
 #if AP_RANGEFINDER_ENABLED && (APM_BUILD_TYPE(APM_BUILD_Rover) || APM_BUILD_TYPE(APM_BUILD_ArduSub))
         { MAVLINK_MSG_ID_WATER_DEPTH,           MSG_WATER_DEPTH},
+#endif
+#if AP_VESC_ENABLED && APM_BUILD_TYPE(APM_BUILD_ArduSub)
+        // only ArduSub produces DEBUG_FLOAT_ARRAY, and only as VESC_V1
+        { MAVLINK_MSG_ID_DEBUG_FLOAT_ARRAY,     MSG_VESC_V1},
 #endif
 #if HAL_HIGH_LATENCY2_ENABLED
         { MAVLINK_MSG_ID_HIGH_LATENCY2,         MSG_HIGH_LATENCY2},
@@ -7298,6 +7303,9 @@ void GCS_MAVLINK::initialise_message_intervals_from_streamrates()
             initialise_message_intervals_for_stream(all_stream_entries[i].stream_id);
         }
         set_mavlink_message_id_interval(MAVLINK_MSG_ID_HEARTBEAT, 1000);
+#if AP_VESC_ENABLED && APM_BUILD_TYPE(APM_BUILD_ArduSub)
+        set_ap_message_interval(MSG_VESC_V1, AP_VESC_MAVLINK_V1_INTERVAL_MS);
+#endif
     } else {
         set_mavlink_message_id_interval(MAVLINK_MSG_ID_HIGH_LATENCY2, 5000);
     }
@@ -7307,6 +7315,9 @@ void GCS_MAVLINK::initialise_message_intervals_from_streamrates()
         initialise_message_intervals_for_stream(all_stream_entries[i].stream_id);
     }
     set_mavlink_message_id_interval(MAVLINK_MSG_ID_HEARTBEAT, 1000);
+#if AP_VESC_ENABLED && APM_BUILD_TYPE(APM_BUILD_ArduSub)
+    set_ap_message_interval(MSG_VESC_V1, AP_VESC_MAVLINK_V1_INTERVAL_MS);
+#endif
 #endif
 }
 
@@ -7322,6 +7333,14 @@ bool GCS_MAVLINK::get_default_interval_for_ap_message(const ap_message id, uint1
     if (id == MSG_HIGH_LATENCY2) {
         // handle HL2 requests as a special case because HL2 is not "streamed"
         interval = 5000;
+        return true;
+    }
+#endif
+
+#if AP_VESC_ENABLED && APM_BUILD_TYPE(APM_BUILD_ArduSub)
+    if (id == MSG_VESC_V1) {
+        // VESC_V1 has its own dedicated rate, it is not part of a stream
+        interval = AP_VESC_MAVLINK_V1_INTERVAL_MS;
         return true;
     }
 #endif
