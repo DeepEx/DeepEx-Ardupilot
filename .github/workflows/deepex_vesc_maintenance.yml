@@ -1,0 +1,35 @@
+# Builds the DeepEx VESC maintenance BlueOS extension image (arm64 + amd64) and pushes it to GHCR.
+# Manual (workflow_dispatch) or on tags vesc-maint-v*; it does not run on ordinary pushes.
+name: deepex-vesc-maintenance-extension
+on:
+  workflow_dispatch:
+  push:
+    tags: ['vesc-maint-v*']
+permissions:
+  contents: read
+  packages: write
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests
+        run: |
+          cd Tools/deepex/vesc-maintenance
+          python3 tests/test_bridge.py
+          python3 tests/test_app.py
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: Tools/deepex/vesc-maintenance
+          platforms: linux/arm64,linux/amd64
+          push: true
+          tags: |
+            ghcr.io/deepex/blueos-vesc-maintenance:0.1.0
+            ghcr.io/deepex/blueos-vesc-maintenance:latest
