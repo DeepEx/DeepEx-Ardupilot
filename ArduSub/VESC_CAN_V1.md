@@ -214,9 +214,39 @@ The following global `NAMED_VALUE_INT` values are produced:
 Fields not representable by standard ESC telemetry use the existing MAVLink
 `DEBUG_FLOAT_ARRAY` message without a dialect change. The name is `VESC_V1`,
 `array_id` is the one-based ArduSub motor number, and one selected motor is
-published per INFO cycle. The MAVLink name field is exactly 10 bytes: the seven
+published per scheduler call (see "VESC_V1 scheduling" below). The MAVLink name field is exactly 10 bytes: the seven
 ASCII bytes `VESC_V1` followed by three zero bytes. Consumers must check index
 0 before decoding.
+
+### VESC_V1 scheduling
+
+`VESC_V1` has its own MAVLink message slot (`MSG_VESC_V1`, MAVLink id 350) and
+is no longer sent from the 2 Hz `STREAM_EXTENDED_STATUS` INFO cycle. The
+global `VESC_*` `NAMED_VALUE_INT` values are unchanged and still sent from the
+INFO cycle.
+
+- Default interval: `AP_VESC_MAVLINK_V1_INTERVAL_MS` = 33 ms, applied to every
+  MAVLink channel at start-up. It does not depend on any `SRn_*` parameter.
+- One selected motor is sent per call, in round-robin order. With six motors
+  the cycle is 198 ms, so each motor is refreshed at about 5 Hz (30 messages/s
+  per channel). With N selected motors each is refreshed at about 30/N Hz.
+- The cursor is per channel, so one client does not change the sequence seen
+  by another.
+- `MAV_CMD_SET_MESSAGE_INTERVAL` for message 350 overrides the default on the
+  requesting channel only: interval `0` restores 33 ms, `-1` stops it. The
+  interval is the time between messages of the whole cycle, not per motor.
+  `MAV_CMD_REQUEST_MESSAGE` for 350 sends the next motor once.
+- Buffer full: the scheduler is asked to retry. Payload space is checked
+  before a motor is selected, and the cursor only advances after the message
+  is written, so no motor is skipped or repeated. The message uses the normal
+  deferred-message path and never blocks.
+- Bandwidth: about 265 bytes per message, so about 8 kB/s per channel at the
+  default rate. A client on a slow link should request a longer interval.
+- MAVLink 1 channels cannot carry message 350 (as for any id above 255).
+- Id 350 maps only to `VESC_V1`. ArduSub has no other `DEBUG_FLOAT_ARRAY`
+  producer, and the mapping exists only for ArduSub builds with `AP_VESC`.
+  If another producer is added, a different message-id mapping is needed.
+- The packet contents and indices below are unchanged.
 
 | Index | Value |
 |---:|---|

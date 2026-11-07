@@ -50,10 +50,12 @@ private:
     bool send_info(void);
 
 #if AP_VESC_ENABLED
-    // state variable for the last VESC motor we sent a VESC_V1 debug
+    // state variable for the next VESC motor to send a VESC_V1 debug
     // float array for. Per-channel so each GCS link independently
     // cycles through every selected motor.
-    uint8_t next_vesc_motor;
+    uint8_t next_vesc_motor = 0;
+    // send VESC_V1 for the next motor; scheduled as MSG_VESC_V1
+    bool send_vesc_v1();
 #endif // AP_VESC_ENABLED
 
     uint8_t base_mode() const override;
