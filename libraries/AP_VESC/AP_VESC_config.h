@@ -20,3 +20,12 @@
 #ifndef AP_VESC_ENABLED
 #define AP_VESC_ENABLED HAL_NUM_CAN_IFACES
 #endif
+
+// Default interval of the dedicated per-motor VESC_V1 MAVLink message
+// (DEBUG_FLOAT_ARRAY, id 350). One motor is sent per interval in
+// round-robin order, so six motors are each refreshed at
+// 1000 / (6 * 33) = ~5 Hz. A client can override it with
+// MAV_CMD_SET_MESSAGE_INTERVAL.
+#ifndef AP_VESC_MAVLINK_V1_INTERVAL_MS
+#define AP_VESC_MAVLINK_V1_INTERVAL_MS 33
+#endif
