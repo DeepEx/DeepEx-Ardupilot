@@ -155,8 +155,11 @@ Mechanical RPM is `electrical_eRPM / pole_pairs`. Both signed values are kept.
 
 `STANDARD` accepts the normal six-byte STATUS_5 and an eight-byte frame but
 always ignores bytes 6..7. `DEEPEX_V1` interprets an eight-byte STATUS_5 field
-as a big-endian `uint16`: bits 0..7 are `mc_fault_code`, bits 8..15 are DeepEx
-warning flags. A standard VESC is never treated as DeepEx unless the parameter
+as a big-endian `uint16`: bits 0..7 (byte 7) are the current `mc_fault_code`
+(`fault_code`), bits 8..15 (byte 6) are `last_fault_code`, the last non-zero
+`mc_fault_code` since the VESC booted, cleared only by a VESC restart and used
+for diagnostics only (it never blocks pre-arm). The authoritative definition is
+IF-0014 §6 (DeepEx-System, `interfaces/IF-0014-deepdrive-ardusub-vesc-can-v1-interface.md`). A standard VESC is never treated as DeepEx unless the parameter
 explicitly selects it.
 
 Freshness groups are independent:
@@ -269,7 +272,7 @@ INFO cycle.
 | 16 | PID position |
 | 17 | tachometer |
 | 18 | fault code |
-| 19 | warning flags |
+| 19 | last fault code (diagnostic only) |
 | 20 | last STATUS_1 boot time ms |
 | 21 | last STATUS_4 boot time ms |
 | 22 | last STATUS_5 boot time ms |
@@ -281,7 +284,7 @@ This layout is append-only within version 1. A semantic or scaling change
 requires a new name/version.
 
 Measurement values at indices 4..17 are zero when their corresponding
-freshness group has never become valid or has become stale. Fault and warning
+freshness group has never become valid or has become stale. Fault and last fault
 codes at indices 18..19 retain the last STATUS_5 report for diagnosis;
 timestamps at indices 20..24 retain the last update time. Consumers must use
 the validity bits in index 3 rather than treating zero as a valid measurement.

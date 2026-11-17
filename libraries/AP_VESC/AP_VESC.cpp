@@ -658,6 +658,8 @@ void AP_VESC::send_commands()
 // @Field: TxE: Cumulative count of failed SET_RPM transmissions
 // @Field: Rx: Electrical RPM reported by the controller in STATUS_1
 // @Field: RxAge: Age of the STATUS_1 telemetry in ms, 65535 if never received
+// @Field: Flt: Current VESC mc_fault_code from STATUS_5, 0 if none
+// @Field: LFlt: Last VESC mc_fault_code since VESC boot (diagnostic only)
 void AP_VESC::log_command(const uint8_t motor, const uint32_t now_ms, const uint16_t pwm,
                           const int32_t request_erpm, const int32_t final_erpm,
                           const uint16_t block, const AP_VESC_Protocol::TxResult tx)
@@ -684,10 +686,10 @@ void AP_VESC::log_command(const uint8_t motor, const uint32_t now_ms, const uint
     const uint32_t age_ms = status_ms == 0 ? 65535U : MIN(65535U, now_ms - status_ms);
     // WriteStreaming drops the record instead of blocking when the buffer is full
     logger->WriteStreaming("VESC",
-                           "TimeUS,Mot,ID,PWM,Req,Cmd,Blk,St,Tx,TxE,Rx,RxAge",
-                           "s#-Yqq----q-",
-                           "F-----------",
-                           "QBBHiiHBBIiH",
+                           "TimeUS,Mot,ID,PWM,Req,Cmd,Blk,St,Tx,TxE,Rx,RxAge,Flt,LFlt",
+                           "s#-Yqq----q---",
+                           "F-------------",
+                           "QBBHiiHBBIiHBB",
                            start_us,
                            uint8_t(motor + 1),
                            uint8_t(_controller_id[motor].get()),
@@ -699,7 +701,9 @@ void AP_VESC::log_command(const uint8_t motor, const uint32_t now_ms, const uint
                            uint8_t(tx),
                            _tx_error_count,
                            _controller_state[motor].erpm,
-                           uint16_t(age_ms));
+                           uint16_t(age_ms),
+                           _controller_state[motor].fault_code,
+                           _controller_state[motor].last_fault_code);
     _log_records++;
     _log_max_us = MAX(_log_max_us, uint32_t(AP_HAL::micros64() - start_us));
 }
@@ -815,7 +819,7 @@ void AP_VESC::handle_frame(const AP_HAL::CANFrame &frame)
         state.tachometer = status.tachometer;
         state.input_voltage = status.input_voltage;
         state.fault_code = status.fault_code;
-        state.warning_flags = status.warning_flags;
+        state.last_fault_code = status.last_fault_code;
         state.active_fault = status.fault_code != 0;
         state.last_status5_ms = now_ms;
 #if HAL_WITH_ESC_TELEM

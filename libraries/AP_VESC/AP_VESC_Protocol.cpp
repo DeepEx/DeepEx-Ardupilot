@@ -139,11 +139,11 @@ bool decode_status_5(const AP_HAL::CANFrame &frame, const Protocol protocol, Sta
     status.tachometer = get_int32_be(&frame.data[0]);
     status.input_voltage = get_int16_be(&frame.data[4]) * 0.1f;
     status.fault_code = 0;
-    status.warning_flags = 0;
+    status.last_fault_code = 0;
     if (protocol == Protocol::DEEPEX_V1 && frame.dlc == 8) {
         const uint16_t deepex_status = get_uint16_be(&frame.data[6]);
         status.fault_code = deepex_status & 0xFF;
-        status.warning_flags = deepex_status >> 8;
+        status.last_fault_code = deepex_status >> 8; // IF-0014 §6.2, diagnostic only
     }
     return true;
 }
@@ -358,7 +358,7 @@ void pack_mavlink_extension(const ControllerState &state,
         data[15] = state.watt_hours_charged;
     }
     data[18] = state.fault_code;
-    data[19] = state.warning_flags;
+    data[19] = state.last_fault_code;
     data[20] = state.last_status1_ms;
     data[21] = state.last_status4_ms;
     data[22] = state.last_status5_ms;

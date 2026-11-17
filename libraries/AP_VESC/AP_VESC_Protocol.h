@@ -74,7 +74,7 @@ struct Status5 {
     int32_t tachometer;
     float input_voltage;
     uint8_t fault_code;
-    uint8_t warning_flags;
+    uint8_t last_fault_code;
 };
 
 struct Freshness {
@@ -107,7 +107,7 @@ struct ControllerState {
     uint8_t controller_id;
     uint8_t motor_number;
     uint8_t fault_code;
-    uint8_t warning_flags;
+    uint8_t last_fault_code;
     bool configured;
     bool expected;
     bool present;
