@@ -1,14 +1,16 @@
 # Vehicle parameters for pod_battery.lua (reference file, ADR-0024). NOT applied automatically.
 # Load with the ground station or copy the lines you need; SCR_ENABLE needs a reboot.
 # On a LIVE vehicle in two steps: BATT_MONITOR=29 makes the BATT_* groups (CAPACITY, FS_*_ACT, ...) appear only after the
-# autopilot restart, so set SCR_ENABLE, BATT_MONITOR, BATT2_MONITOR first, restart, then the rest (see pod_battery.md).
+# autopilot restart, so set SCR_ENABLE, BATT_MONITOR, BATT2_MONITOR, BATT3_MONITOR first, restart, then the rest (see pod_battery.md).
 SCR_ENABLE 1
-# Scripting battery backend for both pod packs
+# Scripting battery backend: BATT_ = most loaded pack (virtual, limiter input), BATT2_ = BAT1 (master pod), BATT3_ = BAT2
 BATT_MONITOR 29
 BATT2_MONITOR 29
+BATT3_MONITOR 29
 # The pods' mAh restart at every pod boot: a capacity would give a false 100 % (the default is 3300 mAh: it MUST be set to 0)
 BATT_CAPACITY 0
 BATT2_CAPACITY 0
+BATT3_CAPACITY 0
 # Battery failsafe actions MUST stay 0 with BATT_MONITOR = 29 (warning only). Why: the voltage seen here is the pack
 # voltage of one pod, reported over the LAN; in single-pack mode it sags under load, and a failsafe action
 # (Surface/Disarm) on it would take the ROV off the task it must finish: bringing it home is the priority.
@@ -18,6 +20,15 @@ BATT_FS_LOW_ACT 0
 BATT_FS_CRT_ACT 0
 BATT2_FS_LOW_ACT 0
 BATT2_FS_CRT_ACT 0
+BATT3_FS_LOW_ACT 0
+BATT3_FS_CRT_ACT 0
+# Pack current limit (ADR-0016 level 2, SPEC-0013 6.4, owner 21/11/2026): ArduSub's own limiter in AP_Motors6DOF scales
+# all motor outputs so that the PRIMARY battery current (here: the most loaded pack) stays under MOT_BAT_CURR_MAX.
+# 28 A per pack, under the 32 A pod OCP. MOT_BAT_CURR_TC: integrator time constant; 5 s (default) is too slow for the
+# OCP (1 s at 32 A, 500 ms at 40 A). 0.5 s is the starting value from a rough model (10 Hz pod data, 100 ms latency):
+# to be tuned on the bench, see pod_battery.md.
+MOT_BAT_CURR_MAX 28
+MOT_BAT_CURR_TC 0.5
 # Arming: the ROV must be armable with a pod off or unreachable (single-pack mode, bring it home).
 # ARMING_SKIPCHK is a bitmask of checks to SKIP. ArduSub's default is
 #   ~(RC | VOLTAGE | BATTERY) & 0xFFFFFF = 16776767 (0xFFFE3F): only RC, board voltage and battery are checked.

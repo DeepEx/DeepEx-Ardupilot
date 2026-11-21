@@ -11,8 +11,20 @@ UDP to the Raspberry Pi (port 14560, BlueOS MAVLink router endpoint), MAVLink 2,
 
 | compid | pod | `BATTERY_STATUS.id` | battery monitor |
 | --- | --- | --- | --- |
-| 180 | master / BAT1 | 0 | `BATT_` (index 0) |
-| 181 | slave / BAT2 | 1 | `BATT2_` (index 1) |
+| 180 | master / BAT1 | 0 | `BATT2_` (index 1) |
+| 181 | slave / BAT2 | 1 | `BATT3_` (index 2) |
+| — | virtual «most loaded pack» | — | `BATT_` (index 0, primary) |
+
+Since 22/11/2026 (owner decision, ADR-0016 level 2): the primary battery is virtual. Its current is the highest current
+among the packs with a fresh voltage and a valid current; its voltage is the highest of their voltages (the bus); consumed
+mAh is the sum when both are valid. ArduSub's own current limiter (`MOT_BAT_CURR_MAX`, `AP_Motors6DOF::output_armed_stabilizing`)
+uses only the primary battery: with `MOT_BAT_CURR_MAX = 28` it scales all motor outputs, controllers included, to keep every
+pack under 28 A, with one pack or two (a parallel that shares the load unevenly is covered too). It does not depend on
+`PWR_MODE`. With no valid pack current the primary is unhealthy and the limiter does nothing: owner decision, loss of the pod
+data = notify only (text `no pack current, MOT_BAT_CURR_MAX inactive`). Cockpit shows the virtual battery as the main one
+and BAT1/BAT2 as batteries 2 and 3 (owner OK).
+
+`PWR_BUDG` (pod 0.8.11) is logged in `PMAX` but not used: the limit is the fixed parameter.
 
 `HEARTBEAT` 1 Hz, `BATTERY_STATUS` 10 Hz, `NAMED_VALUE_INT` `PWR_MODE` / `PWR_RSN` 2 Hz. The script accepts only sysid
 `PBAT_SYSID` (1) and compid 180/181; everything else is dropped before decoding. A message whose `id` does not match its
@@ -36,9 +48,12 @@ any other network, and keep the battery failsafe actions at 0 (see below).
   every change: a DataFlash line `PWRM` (`Comp`, `Mode`, `Rsn`) and an INFO text `PodBatt: BATn power mode <name> reason <n>`
   (unchanged states are not repeated). The pod's current budget is not sent and not used.
 - **Texts:** `PodBatt: started`, `BATn no data from pod yet`, `BATn pod silent for >N ms`, `BATn voltage not valid`,
-  `BATn pod battery online`, and a warning if `BATT_MONITOR`/`BATT2_MONITOR` is not 29.
+  `BATn pod battery online`, and a warning if `BATT_MONITOR`/`BATT2_MONITOR`/`BATT3_MONITOR` is not 29 or `MOT_BAT_CURR_MAX` is 0.
 
 ### Log
+
+- `PMAX` (on change, at least 1 Hz): `Src` (0 = BAT1, 1 = BAT2, 255 = none), `I` and `V` of the virtual primary, `Bud1`/`Bud2`
+  (`PWR_BUDG` of each pod, A x 10, -1 = not received).
 
 - The `BAT` line of ArduPilot (instance 0 and 1) **does record the health**: field `H` (`health`, 1 = healthy, 0 = not), next to
   `Volt`, `Curr`, `CurrTot`, `Temp`. Analysis must discard the rows with `H = 0`: an unhealthy pod is published as 0 V, and
@@ -47,6 +62,22 @@ any other network, and keep the battery failsafe actions at 0 (see below).
 - `PBAT` (1 Hz, one row per pod): `Comp`, `Healthy`, `AgeMs` (ms since the last `BATTERY_STATUS`, -1 = none yet), `RxB`
   (BATTERY_STATUS accepted), `RxN` (NAMED_VALUE_INT accepted), `Ign` (id/compid mismatches), `Cap` (calls that used up the
   decode budget). The queue API has no drop counter: a loss shows as `RxB` growing slower than the pod's 10 Hz.
+
+## Current limiter tuning (ADR-0016)
+
+Rough model (not a qualification): ArduSub limiter integrator at 200 Hz, pack current sampled by the pod at 10 Hz and
+delivered 100 ms later, current ~ command^1.5, full-stick step at a demand of 40/60/90 A unlimited.
+
+| `MOT_BAT_CURR_TC` | time >= 40 A (90 A demand) | time > 32 A | steady |
+| --- | --- | --- | --- |
+| 5 s (default) | 1505 ms: OCP trips | 2610 ms | — |
+| 1 s | 380 ms | 440 ms | 28 A |
+| 0.5 s | 245 ms | 270 ms | 28 A |
+| 0.3 s | 210 ms | 250 ms | oscillates (0–60 A) |
+
+Starting value 0.5 s. With the old 100 ms peak OCP every full-stick step above 40 A would trip; the pod peak was slowed
+to 500 ms (owner 21/11, pod 0.8.11). Bench: single pack, full-stick steps in MANUAL, `PMAX` and the pod `/api/debug`
+(`overcurrent_elapsed_ms`) against the OCP times; lower TC only if steady and no oscillation.
 
 ## Parameters of the script (table key 118, prefix `PBAT_`)
 
@@ -63,9 +94,11 @@ Reference file: `pod_battery.parm` (not applied automatically; do not apply them
 | Parameter | Value | Why |
 | --- | --- | --- |
 | `SCR_ENABLE` | 1 | scripting on (reboot) |
-| `BATT_MONITOR`, `BATT2_MONITOR` | 29 | scripting backend |
-| `BATT_CAPACITY`, `BATT2_CAPACITY` | 0 | the pod mAh restart at every pod boot: a capacity would give a false 100 % |
-| `BATT_FS_LOW_ACT`, `BATT_FS_CRT_ACT`, `BATT2_FS_LOW_ACT`, `BATT2_FS_CRT_ACT` | **0** | warning only, see "Failsafe" |
+| `BATT_MONITOR`, `BATT2_MONITOR`, `BATT3_MONITOR` | 29 | scripting backend (virtual primary, BAT1, BAT2) |
+| `BATT_CAPACITY`, `BATT2_CAPACITY`, `BATT3_CAPACITY` | 0 | the pod mAh restart at every pod boot: a capacity would give a false 100 % |
+| `BATT_FS_*_ACT`, `BATT2_FS_*_ACT`, `BATT3_FS_*_ACT` | **0** | warning only, see "Failsafe" |
+| `MOT_BAT_CURR_MAX` | 28 | pack current limit (A), 0 = limiter off |
+| `MOT_BAT_CURR_TC` | 0.5 | limiter time constant (s), see "Current limiter tuning" |
 | `ARMING_SKIPCHK` | 16777023 | the ROV must be armable with a pod off, see "Arming" |
 
 ### Load and memory
@@ -144,7 +177,7 @@ sudo ss -lunp | grep -E '14560|14550'
 ### Procedure: install (nothing is installed by this repo)
 
 1. Save the current parameters (`PARAM_REQUEST_LIST`, see the evidence capture of 2026-11-21) so that they can be restored. On the vehicle
-   `SCR_ENABLE = 0` and `BATT_MONITOR = BATT2_MONITOR = 0`; `ARMING_SKIPCHK` is the default 16776767.
+   `SCR_ENABLE = 0` and `BATT_MONITOR = BATT2_MONITOR = BATT3_MONITOR = 0`; `ARMING_SKIPCHK` is the default 16776767.
 2. In BlueOS add the UDP Server endpoint on 14560 (above) and check that the pods' frames arrive (`tcpdump`, or MAVLink Inspector).
 3. On the Pi host:
    ```
@@ -154,7 +187,7 @@ sudo ss -lunp | grep -E '14560|14550'
    sudo cp mavlink_msgs.lua mavlink_msg_BATTERY_STATUS.lua mavlink_msg_NAMED_VALUE_INT.lua $D/modules/MAVLink/
    ```
 4. **Two steps for the parameters**, because most of them do not exist until the first restart:
-   - first set `SCR_ENABLE = 1`, `BATT_MONITOR = 29`, `BATT2_MONITOR = 29` and restart **the autopilot** (BlueOS; the Pi and the containers are not restarted);
+   - first set `SCR_ENABLE = 1`, `BATT_MONITOR = 29`, `BATT2_MONITOR = 29`, `BATT3_MONITOR = 29` and restart **the autopilot** (BlueOS; the Pi and the containers are not restarted);
    - after the restart `SCR_HEAP_SIZE`, `SCR_VM_I_COUNT` and the `BATT_*` / `BATT2_*` groups exist: set `BATT_CAPACITY = 0`, `BATT2_CAPACITY = 0`
      (**the default is 3300 mAh**, which would give a false remaining percentage) and confirm the four `*_FS_*_ACT` are 0 (they are by default;
      `BATT_LOW_VOLT` and `BATT_CRT_VOLT` default to 0 on ArduSub).
@@ -165,7 +198,7 @@ sudo ss -lunp | grep -E '14560|14550'
 
 ### Procedure: remove
 
-1. Disarmed. Set `BATT_MONITOR = 0`, `BATT2_MONITOR = 0`, restore `ARMING_SKIPCHK` to its previous value (16776767 on this vehicle) if it was changed, and
+1. Disarmed. Set `BATT_MONITOR = 0`, `BATT2_MONITOR = 0`, `BATT3_MONITOR = 0`, `MOT_BAT_CURR_MAX = 0`, restore `ARMING_SKIPCHK` to its previous value (16776767 on this vehicle) if it was changed, and
    `SCR_ENABLE = 0` only if no other script is installed (none is, at the time of writing).
 2. Delete `pod_battery.lua` from the host scripts directory (the three modules can stay: nothing loads them without the script).
 3. Restart the autopilot from BlueOS.
@@ -190,7 +223,7 @@ This also means that a battery which is really low does not block arming by itse
 
 ## Failsafe
 
-`BATT_FS_LOW_ACT`, `BATT_FS_CRT_ACT` (and the `BATT2_` ones) **must stay 0** with `BATT_MONITOR = 29`.
+`BATT_FS_LOW_ACT`, `BATT_FS_CRT_ACT` (and the `BATT2_`, `BATT3_` ones) **must stay 0** with `BATT_MONITOR = 29`.
 
 - **A silent pod is not a failsafe action in this source.** A battery unhealthy for more than 5 s while armed makes ArduPilot print
   `Battery N is missing, last: 0.00V used X mAh`, set its battery-failsafe flag (LED/buzzer) and call the handler with action **0**
@@ -211,6 +244,12 @@ This also means that a battery which is really low does not block arming by itse
   `MAV_CMD_BATTERY_RESET` with `param1 = 2`.
 
 ## Test
+
+**22/11/2026 (virtual primary and limiter): the SITL script below still assumes BAT1 on `BATT_` and BAT2 on `BATT2_` and has
+NOT been updated or re-run.** Checked only on a host harness (Lua 5.4, stubbed bindings, real frames from pymavlink):
+mapping BAT1 -> monitor 1, BAT2 -> monitor 2; primary = most loaded pack with both pods, with one pod silent, with one
+current invalid; primary unhealthy with no valid current; foreign sysid ignored. To do before installing: update the SITL
+scenarios to the new mapping and add a limiter check (pack current above 28 A -> motor outputs reduced).
 
 `Tools/scripts/deepex_pod_battery_sitl.py` starts the SITL `ardusub` (`./waf sub`) with this script and emulates both pods (truncated MAVLink 2
 payloads, 41 of 54 bytes for `BATTERY_STATUS`). `--scenario functional` (default, 43 checks): `ARMING_SKIPCHK` before/after, arming, the batteries,

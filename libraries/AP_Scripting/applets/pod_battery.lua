@@ -3,11 +3,16 @@
 
   Each pod (ESP32 distribution board) sends MAVLink 2 over the vehicle LAN to the Raspberry Pi (via the
   BlueOS router), sysid 1:
-    compid 180 = BAT1 (master pod), BATTERY_STATUS id 0  -> battery monitor index 0 (BATT_)
-    compid 181 = BAT2 (slave pod),  BATTERY_STATUS id 1  -> battery monitor index 1 (BATT2_)
-  This script feeds the "Scripting" battery backend (BATT_MONITOR = 29, BATT2_MONITOR = 29) and reports the
-  power mode (NAMED_VALUE_INT PWR_MODE / PWR_RSN) as a text message and a DataFlash "PWRM" line.
-  It never acts on the motors (the single-battery limit of ADR-0016 is NOT part of this script).
+    compid 180 = BAT1 (master pod), BATTERY_STATUS id 0  -> battery monitor index 1 (BATT2_)
+    compid 181 = BAT2 (slave pod),  BATTERY_STATUS id 1  -> battery monitor index 2 (BATT3_)
+  Battery monitor index 0 (BATT_, the primary) is a virtual "most loaded pack": current = the highest current of
+  the packs with a fresh, valid measurement; voltage = the highest of their voltages (the bus). ArduSub's own
+  current limiter (MOT_BAT_CURR_MAX, AP_Motors6DOF) works on the primary battery only: with MOT_BAT_CURR_MAX = 28
+  it keeps every pack under 28 A, with one pack or two (ADR-0016 level 2, SPEC-0013 6.4). When no pack has a valid
+  current the primary is unhealthy and the limiter does nothing (owner: loss of the pod data = notify only).
+  All three use the "Scripting" battery backend (BATT_MONITOR = BATT2_MONITOR = BATT3_MONITOR = 29). The power mode
+  (NAMED_VALUE_INT PWR_MODE / PWR_RSN / PWR_BUDG) is reported as a text message and a DataFlash "PWRM" line.
+  The script itself never commands the motors.
 
   See pod_battery.md for the contract, parameters and vehicle setup.
 --]]
@@ -69,7 +74,10 @@ end
 
 local COMPID_BAT1 = 180   -- MAV_COMP_ID_BATTERY  (master pod)
 local COMPID_BAT2 = 181   -- MAV_COMP_ID_BATTERY2 (slave pod)
-local COMPID_TO_INDEX = {[COMPID_BAT1] = 0, [COMPID_BAT2] = 1}
+local COMPID_TO_INDEX = {[COMPID_BAT1] = 0, [COMPID_BAT2] = 1}   -- pod index (= BATTERY_STATUS.id)
+local MONITOR_VIRTUAL = 0          -- BATT_  : most loaded pack (input of MOT_BAT_CURR_MAX)
+local function monitor_of(idx) return idx + 1 end   -- BAT1 -> BATT2_, BAT2 -> BATT3_
+local MONITOR_PARAM = {[0] = "BATT_MONITOR", [1] = "BATT2_MONITOR", [2] = "BATT3_MONITOR"}
 
 local VOLTAGE_INVALID = 65535      -- UINT16_MAX
 local CURRENT_INVALID = -1         -- cA
@@ -182,12 +190,14 @@ for idx = 0, 1 do
         v = nil, i = NaN, mah = NaN, temp = NaN,   -- last decoded values (V, A, mAh, degC); nil/NaN = not valid
         healthy = nil,          -- last published health (for transition messages)
         pwr_mode = nil, pwr_rsn = nil,             -- last PWR_MODE / PWR_RSN received
+        pwr_budg = nil,                            -- last PWR_BUDG received (A x 10, informative)
         pwr_pub_mode = nil, pwr_pub_rsn = nil,     -- last reported pair
         pwr_pending = false,
         id_mismatch_warned = false,
         n_batt = 0, n_named = 0, n_ignored = 0, n_crc = 0,
     }
 end
+local virtual = {healthy = nil, src = 255, i = NaN, v = 0}   -- last published most-loaded-pack values
 local decode_budget_hits = 0       -- calls that stopped popping because the decode budget was used up
 local last_stats_ms = nil
 
@@ -232,6 +242,10 @@ local function handle_named_value(idx, m)
         p.pwr_mode = m.value
     elseif m.name == "PWR_RSN" then
         p.pwr_rsn = m.value
+    elseif m.name == "PWR_BUDG" then
+        p.pwr_budg = m.value
+        p.n_named = p.n_named + 1
+        return
     else
         return
     end
@@ -284,11 +298,16 @@ end
 
 -- ---------------------------------------------------------------- publish to the battery monitors
 
+local function pack_healthy(p, t_ms)
+    local fresh = p.rx_ms ~= nil and (t_ms - p.rx_ms) <= PBAT_TIMEOUT_MS:get()
+    return fresh and p.v ~= nil, fresh
+end
+
 local function publish(idx, t_ms)
     local p = packs[idx]
     local timeout = PBAT_TIMEOUT_MS:get()
-    local fresh = p.rx_ms ~= nil and (t_ms - p.rx_ms) <= timeout
-    local healthy = fresh and p.v ~= nil
+    local healthy, fresh = pack_healthy(p, t_ms)
+    local monitor = monitor_of(idx)
 
     local state = BattMonitorScript_State()
     state:healthy(healthy)
@@ -308,11 +327,11 @@ local function publish(idx, t_ms)
     end
     -- capacity_remaining_pct is NOT set (the pods have no SOC): it stays at its "invalid" default
 
-    if not battery:handle_scripting(idx, state) then
-        if not warned_publish[idx] then
-            warned_publish[idx] = true
-            gcs:send_text(MAV_SEVERITY.WARNING, string.format("%s: battery %d not scripting (set BATT%s_MONITOR 29)",
-                          SCRIPT_NAME, idx + 1, idx == 0 and "" or "2"))
+    if not battery:handle_scripting(monitor, state) then
+        if not warned_publish[monitor] then
+            warned_publish[monitor] = true
+            gcs:send_text(MAV_SEVERITY.WARNING, string.format("%s: BAT%d not scripting (set %s 29)",
+                          SCRIPT_NAME, idx + 1, MONITOR_PARAM[monitor]))
         end
     end
 
@@ -330,6 +349,59 @@ local function publish(idx, t_ms)
         end
         p.healthy = healthy
     end
+end
+
+-- Virtual primary battery: the most loaded pack among those with a fresh voltage AND a valid current.
+-- A pack with a NaN current never wins (NaN comparisons are false); with no valid current the primary is unhealthy,
+-- so MOT_BAT_CURR_MAX does nothing (AP_Motors6DOF returns before scaling when current_amps() fails).
+local function publish_virtual(t_ms)
+    local best_i, best_src, bus_v, mah_sum, mah_ok, temp_max = nil, 255, nil, 0, true, nil
+    for idx = 0, 1 do
+        local p = packs[idx]
+        local healthy = pack_healthy(p, t_ms)
+        if healthy then
+            if bus_v == nil or p.v > bus_v then bus_v = p.v end
+            if p.i == p.i then   -- not NaN
+                if best_i == nil or p.i > best_i then best_i = p.i; best_src = idx end
+            end
+            if p.mah == p.mah then mah_sum = mah_sum + p.mah else mah_ok = false end
+            if p.temp == p.temp and (temp_max == nil or p.temp > temp_max) then temp_max = p.temp end
+        end
+    end
+    local healthy = best_i ~= nil
+    local state = BattMonitorScript_State()
+    state:healthy(healthy)
+    state:cell_count(0)
+    if healthy then
+        state:voltage(bus_v)
+        state:current_amps(best_i)
+        state:consumed_mah(mah_ok and mah_sum or NaN)
+        state:temperature(temp_max or NaN)
+    else
+        state:voltage(0)
+        state:current_amps(NaN)
+        state:consumed_mah(NaN)
+        state:temperature(NaN)
+    end
+    if not battery:handle_scripting(MONITOR_VIRTUAL, state) then
+        if not warned_publish[MONITOR_VIRTUAL] then
+            warned_publish[MONITOR_VIRTUAL] = true
+            gcs:send_text(MAV_SEVERITY.WARNING, string.format("%s: primary not scripting (set BATT_MONITOR 29)", SCRIPT_NAME))
+        end
+    end
+    if healthy ~= virtual.healthy then
+        if virtual.healthy ~= nil or not healthy then
+            if healthy then
+                gcs:send_text(MAV_SEVERITY.INFO, string.format("%s: pack current available, limiter input on", SCRIPT_NAME))
+            else
+                gcs:send_text(MAV_SEVERITY.WARNING, string.format("%s: no pack current, MOT_BAT_CURR_MAX inactive", SCRIPT_NAME))
+            end
+        end
+        virtual.healthy = healthy
+    end
+    virtual.src = best_src
+    virtual.i = healthy and best_i or NaN
+    virtual.v = healthy and bus_v or 0
 end
 
 -- ---------------------------------------------------------------- power mode reporting (no action)
@@ -359,14 +431,22 @@ local function check_configuration()
     if warned_config then
         return
     end
-    for idx = 0, 1 do
-        local name = idx == 0 and "BATT_MONITOR" or "BATT2_MONITOR"
+    for monitor = 0, 2 do
+        local name = MONITOR_PARAM[monitor]
         local value = param:get(name)
         if value ~= 29 then
             gcs:send_text(MAV_SEVERITY.WARNING, string.format("%s: %s is %s, must be 29 (Scripting)",
                           SCRIPT_NAME, name, tostring(value)))
             warned_config = true
         end
+    end
+    local imax = param:get("MOT_BAT_CURR_MAX")
+    if imax == nil or imax <= 0 then
+        gcs:send_text(MAV_SEVERITY.WARNING, string.format("%s: MOT_BAT_CURR_MAX is %s: pack current limiter OFF",
+                      SCRIPT_NAME, tostring(imax)))
+        warned_config = true
+    else
+        gcs:send_text(MAV_SEVERITY.INFO, string.format("%s: pack current limit %.1f A (MOT_BAT_CURR_MAX)", SCRIPT_NAME, imax))
     end
 end
 
@@ -389,6 +469,20 @@ local function log_stats(t_ms)
     end
 end
 
+-- Limiter input at the publish rate (40 Hz) only while it changes or once per second: source pack (0 = BAT1, 1 = BAT2,
+-- 255 = none), current and bus voltage, and the budget each pod announces (A x 10, -1 = not received).
+local last_pmax_ms, last_pmax_src, last_pmax_i = nil, nil, nil
+local function log_virtual(t_ms)
+    local changed = virtual.src ~= last_pmax_src or
+                    (virtual.i == virtual.i and (last_pmax_i == nil or math.abs(virtual.i - last_pmax_i) >= 0.5))
+    if not changed and last_pmax_ms ~= nil and (t_ms - last_pmax_ms) < STATS_LOG_PERIOD_MS then
+        return
+    end
+    last_pmax_ms, last_pmax_src, last_pmax_i = t_ms, virtual.src, virtual.i
+    logger:write("PMAX", "Src,I,V,Bud1,Bud2", "Bffii", virtual.src, virtual.i, virtual.v,
+                 packs[0].pwr_budg or -1, packs[1].pwr_budg or -1)
+end
+
 local function update()
     drain_messages()
     local t_ms = now_ms()
@@ -396,6 +490,8 @@ local function update()
         publish(idx, t_ms)
         report_power_state(idx)
     end
+    publish_virtual(t_ms)
+    log_virtual(t_ms)
     log_stats(t_ms)
     return update, UPDATE_PERIOD_MS
 end
