@@ -649,16 +649,19 @@ def main():
     for d, _, files in os.walk(work):
         logs += [os.path.join(d, f) for f in files if f.endswith(".BIN")]
     bat, pwrm, scr, pbat = {0: [], 1: []}, [], [], {180: [], 181: []}
+    crc_counts = {180: 0, 181: 0}
     if logs:
         reader = DFReader.DFReader_binary(sorted(logs)[-1])
         while True:
-            m = reader.recv_match(type=["BAT", "PWRM", "SCR", "PBAT"])
+            m = reader.recv_match(type=["BAT", "PWRM", "SCR", "PBAT", "PBCR"])
             if m is None:
                 break
             if m.get_type() == "SCR":
                 scr.append((m.Name, m.Runtime, m.Total_mem, m.Run_mem))
             elif m.get_type() == "BAT":
                 bat.setdefault(m.Inst, []).append((m.Volt, m.Curr, m.CurrTot, m.H))
+            elif m.get_type() == "PBCR":
+                crc_counts[m.Comp] = m.Crc
             elif m.get_type() == "PBAT":
                 pbat.setdefault(m.Comp, []).append((m.Healthy, m.AgeMs, m.RxB, m.RxN, m.Ign, m.Cap,
                                                    getattr(m, "Crc", 0)))
@@ -703,7 +706,7 @@ def main():
         res.check("3) PBAT rows (1 Hz) carry Healthy/AgeMs/counters for both pods",
                   len(pbat.get(180, [])) > 10 and len(pbat.get(181, [])) > 10 and
                   any(h == 0 for h, *_ in pbat.get(181, [])) and any(h == 1 for h, *_ in pbat.get(181, [])))
-        res.check("CRC: PBAT records rejected CRC packets", any(row[6] > 0 for row in pbat.get(180, [])))
+        res.check("CRC: PBCR records rejected CRC packets", crc_counts[180] > 0)
 
     mine = [r for r in scr if "pod_battery" in str(r[0])]
     if mine:
