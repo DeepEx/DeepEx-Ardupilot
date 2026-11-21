@@ -381,9 +381,11 @@ local function log_stats(t_ms)
         local p = packs[idx]
         local age = -1
         if p.rx_ms ~= nil then age = t_ms - p.rx_ms end
-        logger:write("PBAT", "Comp,Healthy,AgeMs,RxB,RxN,Ign,Cap,Crc", "BBiIIIII",
+        logger:write("PBAT", "Comp,Healthy,AgeMs,RxB,RxN,Ign,Cap", "BBiIIII",
                      idx == 0 and COMPID_BAT1 or COMPID_BAT2, p.healthy and 1 or 0, age,
-                     p.n_batt, p.n_named, p.n_ignored, decode_budget_hits, p.n_crc)
+                     p.n_batt, p.n_named, p.n_ignored, decode_budget_hits)
+        -- A separate record preserves the PBAT schema across script restarts without an autopilot reboot.
+        logger:write("PBCR", "Comp,Crc", "BI", idx == 0 and COMPID_BAT1 or COMPID_BAT2, p.n_crc)
     end
 end
 

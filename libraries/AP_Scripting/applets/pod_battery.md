@@ -82,7 +82,7 @@ Reference file: `pod_battery.parm` (not applied automatically; do not apply them
 
 One run of a script is limited to `SCR_VM_I_COUNT` (10000 by default) VM instructions and ArduSub **stops the script** that goes over
 (`Lua: ./scripts/pod_battery.lua exceeded time limit`). The first version did exactly that under load; the script now drops
-messages of other senders after a few instructions, decodes at most 4 per call, and bounds work per call. The earlier claim that the C parser only hands over verified frames was incorrect: this fork explicitly passes BAD_CRC packets to scripting. The applet now verifies CRC before decoding, with a three-message budget.
+messages of other senders after a few instructions, decodes at most 3 per call, and bounds work per call. The earlier claim that the C parser only hands over verified frames was incorrect: this fork explicitly passes BAD_CRC packets to scripting. The applet now verifies CRC before decoding, with a three-message budget.
 
 SITL load test (`Tools/scripts/deepex_pod_battery_sitl.py --scenario load`, 60 s): pods at **3x** the real rate (30 Hz per pod,
 84 msg/s) plus 125 `NAMED_VALUE_INT`/s from other components (4 compids with sysid 1 and one foreign system claiming compid 180):
@@ -227,7 +227,7 @@ payload before decoding, so it does not depend on that. `mavlink_msgs.decode()` 
 The fork passes `MAVLINK_FRAMING_BAD_CRC` packets to scripting so that scripts can handle dialects unknown to C++.
 Our message types are known: their CRC must be checked in Lua. CRC is checked against the transmitted header and
 payload before zero-filling. Rejected packets do not update measurements, freshness or power state.
-`PBAT.Crc` counts rejected packets per pod; `PBAD` records metadata for the first three rejects per pod per script start.
+`PBCR.Crc` counts rejected packets per pod; `PBAD` records metadata for the first three rejects per pod per script start.
 CRC validates integrity, not sender authentication. Functional SITL includes corrupt-CRC messages with a matching
 sysid/compid/id: they cannot replace voltage or prevent the normal timeout.
 See [POD_BATTERY_CRC_DIAGNOSIS_20261121.md](POD_BATTERY_CRC_DIAGNOSIS_20261121.md) for evidence and limits.
