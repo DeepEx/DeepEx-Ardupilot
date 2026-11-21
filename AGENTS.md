@@ -394,3 +394,9 @@ Open a discussion before writing code if:
 - **Do not move functions around without goal**: Keep the original code structure as possible.
 - **Do not add comment on all functions/lines**: Document only what was change and useful for future reading.
 - **Do not duplicate PRs**: If a PR was already open on a feature/bugfix/changes recently, do not duplicate it.
+
+## DeepEx agent checkpoints and handoffs
+
+For extended, multi-session, high-cost, or interrupted DeepEx work, follow the centrally governed [Agent checkpoints and handoffs protocol](https://github.com/DeepEx/DeepEx-System/blob/main/CONTRIBUTING.md#agent-checkpoints-and-handoffs). Keep an objective-owned persistent `CURRENT.md` and phase checkpoints recording verified Git/operational state, tests, blockers, authorizations, and the next executable action. On resumption, verify actual state and reuse existing branches and Plane tasks instead of repeating completed work.
+
+This cross-repository reference does not override repository-specific or upstream safety rules, Work Package constraints, or authorization requirements. Do not publish secrets or private evidence; a checkpoint does not authorize external writes, push, PR, merge, deployment, or service changes.
