@@ -89,7 +89,6 @@ local QUEUE_DEPTH = 25             -- mavlink:init queue depth (the API maximum)
 local MAX_DECODES_PER_UPDATE = 4
 local MAX_POPS_PER_UPDATE = 60
 local STATS_LOG_PERIOD_MS = 1000   -- PBAT log row per pod
-local PWR_TEXT_MIN_INTERVAL_MS = 1000  -- text rate limit per pod (the log line is written at every change)
 
 -- ---------------------------------------------------------------- MAVLink receive
 
@@ -171,7 +170,6 @@ for idx = 0, 1 do
         healthy = nil,          -- last published health (for transition messages)
         pwr_mode = nil, pwr_rsn = nil,             -- last PWR_MODE / PWR_RSN received
         pwr_pub_mode = nil, pwr_pub_rsn = nil,     -- last reported pair
-        pwr_text_ms = nil,      -- time of the last text sent for this pod
         pwr_pending = false,
         id_mismatch_warned = false,
         n_batt = 0, n_named = 0, n_ignored = 0,
@@ -315,7 +313,7 @@ end
 
 -- ---------------------------------------------------------------- power mode reporting (no action)
 
-local function report_power_state(idx, t_ms)
+local function report_power_state(idx)
     local p = packs[idx]
     if not p.pwr_pending or p.pwr_mode == nil or p.pwr_rsn == nil then
         return
@@ -326,17 +324,12 @@ local function report_power_state(idx, t_ms)
     end
     -- DataFlash line at every change: compid, mode, reason
     logger:write("PWRM", "Comp,Mode,Rsn", "BBi", idx == 0 and COMPID_BAT1 or COMPID_BAT2, p.pwr_mode, p.pwr_rsn)
-    -- text message at most once per second per pod (a reason that oscillates must not flood the GCS)
-    if p.pwr_text_ms == nil or (t_ms - p.pwr_text_ms) >= PWR_TEXT_MIN_INTERVAL_MS then
-        local mode_name = PWR_MODE_NAMES[p.pwr_mode] or tostring(p.pwr_mode)
-        gcs:send_text(MAV_SEVERITY.INFO, string.format("%s: BAT%d power mode %s reason %d",
-                      SCRIPT_NAME, idx + 1, mode_name, p.pwr_rsn))
-        p.pwr_text_ms = t_ms
-        p.pwr_pub_mode = p.pwr_mode
-        p.pwr_pub_rsn = p.pwr_rsn
-        p.pwr_pending = false
-    end
-    -- else: still pending, reported by the first update after the interval
+    local mode_name = PWR_MODE_NAMES[p.pwr_mode] or tostring(p.pwr_mode)
+    gcs:send_text(MAV_SEVERITY.INFO, string.format("%s: BAT%d power mode %s reason %d",
+                  SCRIPT_NAME, idx + 1, mode_name, p.pwr_rsn))
+    p.pwr_pub_mode = p.pwr_mode
+    p.pwr_pub_rsn = p.pwr_rsn
+    p.pwr_pending = false
 end
 
 -- ---------------------------------------------------------------- main loop
@@ -378,7 +371,7 @@ local function update()
     local t_ms = now_ms()
     for idx = 0, 1 do
         publish(idx, t_ms)
-        report_power_state(idx, t_ms)
+        report_power_state(idx)
     end
     log_stats(t_ms)
     return update, UPDATE_PERIOD_MS

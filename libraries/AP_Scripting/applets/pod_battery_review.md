@@ -4,6 +4,10 @@ AI-assisted review of the work inherited on `feat/pod-battery-lua`.
 This report records observations and local SITL results; it does not qualify hardware or install anything.
 The inherited implementation is unchanged by this review.
 
+Subsequent owner-authorized installation is recorded in
+[pod_battery_installation_20261121.md](pod_battery_installation_20261121.md).
+That follow-up fixes finding 2 and adds rapid-change regression coverage; the findings below describe the reviewed snapshot.
+
 ## Source and scope
 
 - Base: `e8f381590e456e283d17282b2ef3d47d3989d239`, `feat/vesc-v1-5hz-on-installed`.

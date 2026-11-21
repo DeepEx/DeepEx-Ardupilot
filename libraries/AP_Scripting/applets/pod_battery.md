@@ -34,7 +34,7 @@ any other network, and keep the battery failsafe actions at 0 (see below).
   - `capacity_remaining_pct` is **not** set (the pods have no SOC; `battery_remaining` is -1).
 - **Power mode:** the last `PWR_MODE` (0 UNKNOWN, 1 DUAL, 2 SINGLE_BAT1, 3 SINGLE_BAT2, 4 NONE) and `PWR_RSN` per pod. At
   every change: a DataFlash line `PWRM` (`Comp`, `Mode`, `Rsn`) and an INFO text `PodBatt: BATn power mode <name> reason <n>`
-  (text rate-limited to one per second per pod). The pod's current budget is not sent and not used.
+  (unchanged states are not repeated). The pod's current budget is not sent and not used.
 - **Texts:** `PodBatt: started`, `BATn no data from pod yet`, `BATn pod silent for >N ms`, `BATn voltage not valid`,
   `BATn pod battery online`, and a warning if `BATT_MONITOR`/`BATT2_MONITOR` is not 29.
 
@@ -214,8 +214,9 @@ This also means that a battery which is really low does not block arming by itse
 ## Test
 
 `Tools/scripts/deepex_pod_battery_sitl.py` starts the SITL `ardusub` (`./waf sub`) with this script and emulates both pods (truncated MAVLink 2
-payloads, 41 of 54 bytes for `BATTERY_STATUS`). `--scenario functional` (default, 37 checks): `ARMING_SKIPCHK` before/after, arming, the batteries,
-the timeout, power-mode reporting, foreign senders, the failsafe scenarios, the DataFlash log (`BAT` with `H`, `PWRM`, `PBAT`, `SCR`).
+payloads, 41 of 54 bytes for `BATTERY_STATUS`). `--scenario functional` (default, 39 checks): `ARMING_SKIPCHK` before/after, arming, the batteries,
+the timeout, power-mode reporting (including rapid changes with exactly one log row and INFO text per observed change),
+foreign senders, the failsafe scenarios, the DataFlash log (`BAT` with `H`, `PWRM`, `PBAT`, `SCR`).
 `--scenario load`: the 3x test above. Needs pymavlink.
 
 MAVLink 2 truncation: the sender drops trailing zero bytes of the payload. In the `mavlink_message_t` that reaches Lua those bytes are
