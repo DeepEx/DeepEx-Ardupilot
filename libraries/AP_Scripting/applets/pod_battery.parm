@@ -7,8 +7,19 @@ BATT2_MONITOR 29
 # The pods' mAh restart at every pod boot: a capacity would give a false 100 %
 BATT_CAPACITY 0
 BATT2_CAPACITY 0
-# Warning only, no failsafe action, until the thresholds are verified on the bench
+# Battery failsafe actions MUST stay 0 with BATT_MONITOR = 29 (warning only). Why: the voltage seen here is the pack
+# voltage of one pod, reported over the LAN; in single-pack mode it sags under load, and a failsafe action
+# (Surface/Disarm) on it would take the ROV off the task it must finish: bringing it home is the priority.
+# A silent pod is NOT a failsafe by itself (unhealthy = warning only, action hard-wired to 0), but a pod that
+# reports a real low voltage would act as soon as an action is non-zero. See pod_battery.md.
 BATT_FS_LOW_ACT 0
 BATT_FS_CRT_ACT 0
 BATT2_FS_LOW_ACT 0
 BATT2_FS_CRT_ACT 0
+# Arming: the ROV must be armable with a pod off or unreachable (single-pack mode, bring it home).
+# ARMING_SKIPCHK is a bitmask of checks to SKIP. ArduSub's default is
+#   ~(RC | VOLTAGE | BATTERY) & 0xFFFFFF = 16776767 (0xFFFE3F): only RC, board voltage and battery are checked.
+# This file adds ONLY the Battery bit (1<<8 = 256), the others stay as they are:
+#   16776767 | 256 = 16777023 (0xFFFF3F): only RC and board voltage are checked.
+# If the vehicle's current value is not the default, OR 256 into the value it has instead of using this number.
+ARMING_SKIPCHK 16777023

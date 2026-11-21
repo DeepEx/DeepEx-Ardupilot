@@ -80,10 +80,15 @@ local PWR_MODE_NAMES = {[0] = "UNKNOWN", [1] = "DUAL", [2] = "SINGLE_BAT1", [3] 
 
 local NaN = 0 / 0  -- "not known" for the scripting battery backend (consumed_mah NaN = integrate the current)
 
-local UPDATE_PERIOD_MS = 50        -- 20 Hz
--- Each decode costs ~1000 VM instructions (CRC) and a script call is limited to SCR_VM_I_COUNT (10000 by default):
--- keep the number of decodes per call small. The pods send ~28 messages/s, a call every 50 ms handles up to 6.
-local MAX_MSGS_PER_UPDATE = 6
+local UPDATE_PERIOD_MS = 25        -- 40 Hz
+local QUEUE_DEPTH = 25             -- mavlink:init queue depth (the API maximum)
+-- A script call is limited to SCR_VM_I_COUNT VM instructions (10000 by default; over it ArduSub stops the script).
+-- A decode costs ~1000 instructions, so keep the number of DECODES per call small: the pods send ~28 messages/s
+-- (84/s at 3x), a call every 25 ms decodes up to 4, i.e. 160/s. Messages from other senders are dropped after a few
+-- instructions and do not use the decode budget: pop up to MAX_POPS_PER_UPDATE.
+local MAX_DECODES_PER_UPDATE = 4
+local MAX_POPS_PER_UPDATE = 60
+local STATS_LOG_PERIOD_MS = 1000   -- PBAT log row per pod
 local PWR_TEXT_MIN_INTERVAL_MS = 1000  -- text rate limit per pod (the log line is written at every change)
 
 -- ---------------------------------------------------------------- MAVLink receive
@@ -96,19 +101,47 @@ msg_map[BATTERY_STATUS_ID] = "BATTERY_STATUS"
 msg_map[NAMED_VALUE_INT_ID] = "NAMED_VALUE_INT"
 
 -- initialize MAVLink rx: queue depth and number of rx message ids
-mavlink:init(20, 2)
+mavlink:init(QUEUE_DEPTH, 2)
 mavlink:register_rx_msgid(BATTERY_STATUS_ID)
 mavlink:register_rx_msgid(NAMED_VALUE_INT_ID)
 
 -- Full payload length of each message, from the generated field definitions.
 local full_len = {}
+local defs = {}
 for msgid, name in pairs(msg_map) do
     local def = require("MAVLink/mavlink_msg_" .. name)
+    defs[msgid] = def
     local n = 0
     for _, f in ipairs(def.fields) do
         n = n + string.packsize(f[2]) * (f[3] or 1)
     end
     full_len[msgid] = n
+end
+
+-- Decode the fields of a message with the generated definition (same field mapping as mavlink_msgs.decode()), but
+-- WITHOUT re-computing the CRC in Lua: the C parser only hands over frames whose CRC it has already verified
+-- (GCS_MAVLINK::raw_packetReceived -> AP_Scripting::handle_message), and the Lua CRC loop is about 40 % of the cost
+-- of a decode, which is what the per-call VM instruction limit is spent on.
+local function decode_fields(raw, def)
+    local result = {}
+    local offset = 13
+    for _, v in ipairs(def.fields) do
+        if v[3] then
+            local arr = {}
+            for j = 1, v[3] do
+                arr[j], offset = string.unpack(v[2], raw, offset)
+            end
+            result[v[1]] = arr
+        else
+            local value
+            value, offset = string.unpack(v[2], raw, offset)
+            if string.sub(v[2], 2, 2) == 'c' then
+                value = (string.gsub(value, "\0", ""))
+            end
+            result[v[1]] = value
+        end
+    end
+    return result
 end
 
 -- MAVLink 2 senders drop the trailing zero bytes of the payload. The C parser already restores them as zeros in the
@@ -141,9 +174,11 @@ for idx = 0, 1 do
         pwr_text_ms = nil,      -- time of the last text sent for this pod
         pwr_pending = false,
         id_mismatch_warned = false,
-        n_batt = 0, n_ignored = 0,
+        n_batt = 0, n_named = 0, n_ignored = 0,
     }
 end
+local decode_budget_hits = 0       -- calls that stopped popping because the decode budget was used up
+local last_stats_ms = nil
 
 local warned_config = false
 local warned_publish = {}
@@ -189,12 +224,14 @@ local function handle_named_value(idx, m)
     else
         return
     end
+    p.n_named = p.n_named + 1
     p.pwr_pending = true
 end
 
 local function drain_messages()
     local pbat_sysid = PBAT_SYSID:get()
-    for _ = 1, MAX_MSGS_PER_UPDATE do
+    local decodes = 0
+    for _ = 1, MAX_POPS_PER_UPDATE do
         local raw, _, _ = mavlink:receive_chan()
         if raw == nil then
             return
@@ -205,13 +242,22 @@ local function drain_messages()
         local idx = COMPID_TO_INDEX[compid]
         if idx ~= nil and sysid == pbat_sysid then
             local t_ms = now_ms()
-            local ok, parsed = pcall(mavlink_msgs.decode, zero_fill_payload(raw), msg_map)
-            if ok and parsed ~= nil then
-                if parsed.msgid == BATTERY_STATUS_ID then
-                    handle_battery_status(idx, parsed, t_ms)
-                elseif parsed.msgid == NAMED_VALUE_INT_ID then
-                    handle_named_value(idx, parsed)
+            local msgid = string.unpack("<I3", raw, 10)
+            local def = defs[msgid]
+            if def ~= nil then
+                local ok, parsed = pcall(decode_fields, zero_fill_payload(raw), def)
+                if ok then
+                    if msgid == BATTERY_STATUS_ID then
+                        handle_battery_status(idx, parsed, t_ms)
+                    else
+                        handle_named_value(idx, parsed)
+                    end
                 end
+            end
+            decodes = decodes + 1
+            if decodes >= MAX_DECODES_PER_UPDATE then
+                decode_budget_hits = decode_budget_hits + 1
+                return
             end
         end
     end
@@ -310,6 +356,23 @@ local function check_configuration()
     end
 end
 
+-- Per pod statistics row (1 Hz): who is healthy and how many messages reached the script (the mavlink queue API has
+-- no drop counter, so a loss shows as RxB growing slower than the pod's 10 Hz).
+local function log_stats(t_ms)
+    if last_stats_ms ~= nil and (t_ms - last_stats_ms) < STATS_LOG_PERIOD_MS then
+        return
+    end
+    last_stats_ms = t_ms
+    for idx = 0, 1 do
+        local p = packs[idx]
+        local age = -1
+        if p.rx_ms ~= nil then age = t_ms - p.rx_ms end
+        logger:write("PBAT", "Comp,Healthy,AgeMs,RxB,RxN,Ign,Cap", "BBiIIII",
+                     idx == 0 and COMPID_BAT1 or COMPID_BAT2, p.healthy and 1 or 0, age,
+                     p.n_batt, p.n_named, p.n_ignored, decode_budget_hits)
+    end
+end
+
 local function update()
     drain_messages()
     local t_ms = now_ms()
@@ -317,6 +380,7 @@ local function update()
         publish(idx, t_ms)
         report_power_state(idx, t_ms)
     end
+    log_stats(t_ms)
     return update, UPDATE_PERIOD_MS
 end
 
