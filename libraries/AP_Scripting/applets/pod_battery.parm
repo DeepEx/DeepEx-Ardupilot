@@ -1,0 +1,14 @@
+# Vehicle parameters for pod_battery.lua (reference file, ADR-0024). NOT applied automatically.
+# Load with the ground station or copy the lines you need; SCR_ENABLE needs a reboot.
+SCR_ENABLE 1
+# Scripting battery backend for both pod packs
+BATT_MONITOR 29
+BATT2_MONITOR 29
+# The pods' mAh restart at every pod boot: a capacity would give a false 100 %
+BATT_CAPACITY 0
+BATT2_CAPACITY 0
+# Warning only, no failsafe action, until the thresholds are verified on the bench
+BATT_FS_LOW_ACT 0
+BATT_FS_CRT_ACT 0
+BATT2_FS_LOW_ACT 0
+BATT2_FS_CRT_ACT 0
