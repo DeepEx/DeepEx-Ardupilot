@@ -104,56 +104,74 @@ scripts/modules/MAVLink/mavlink_msg_NAMED_VALUE_INT.lua
 
 The MAVLink modules are **not** embedded in the firmware (no ROMFS entry for them); they must be present in `scripts/modules/MAVLink/`.
 
-### BlueOS 1.4.3 (navigator64): where, and what to check on the Pi
+### BlueOS 1.4.3 on the vehicle (read-only inspection, 2026-11-21)
 
-From the BlueOS **1.4.3** source (tag `1.4.3`, `core/services/ardupilot_manager` and `install/install.sh`): `ardusub` is started by
-the `blueos-core` container with `cwd = firmware_folder`, default `appdirs.user_config_dir("ardupilot-manager")/firmware`, i.e.
-`/root/.config/ardupilot-manager/firmware` inside the container; so the scripts go in
-`/root/.config/ardupilot-manager/firmware/scripts/` (and `.../scripts/modules/MAVLink/`). Logs and storage of that process are in
-`.../firmware/logs/` and `.../firmware/storage/`. `/root/.config` of the core container is a bind mount of the host directory
-`$HOME/.config/blueos` (the installer starts the bootstrap container with `-e BLUEOS_CONFIG_PATH=$HOME/.config/blueos`), normally
-`/home/pi/.config/blueos`. Installing a firmware (`install_firmware_from_file`, also `waf --upload-blueos`) only copies the ELF into
-that folder and never touches `scripts/`, so the scripts survive firmware updates and container restarts.
-**This is from the source, not yet seen on the vehicle**: check it with the read-only commands below.
+Seen on the Pi (BlueOS `bluerobotics/blueos-core:1.4.3`, Raspberry Pi, Debian 12): the autopilot is the file
+`ardupilot_navigator64` (not named `ardusub`), started by the `blueos-core` container as
+`/root/.config/ardupilot-manager/firmware/ardupilot_navigator64 -A udp:127.0.0.1:8852 --log-directory .../firmware/logs/
+--storage-directory .../firmware/storage/ -C /dev/ttyAMA0 -B /dev/ttyAMA2 -E /dev/ttyAMA3 -F /dev/ttyAMA4`, with
+`cwd = /root/.config/ardupilot-manager/firmware`. The scripts directory is therefore
+`/root/.config/ardupilot-manager/firmware/scripts/` in the container; it **already exists and is empty**. `/root/.config` of the container is a
+bind mount of the host directory **`/root/.config/blueos`** (not `/home/pi/...`), so on the host (as root, `sudo`) the scripts go in
 
-Read-only checks, from the BlueOS "red-pill" terminal (host shell):
+```
+/root/.config/blueos/ardupilot-manager/firmware/scripts/            (pod_battery.lua)
+/root/.config/blueos/ardupilot-manager/firmware/scripts/modules/MAVLink/
+```
+
+Installed firmware: `ArduSub V4.8.0-dev (4bffa1cb)` (`AUTOPILOT_VERSION` custom version `4bffa1cb`; binary SHA-256
+`4f16b33d5ba04cbc0cbaafdf6762924cea82bd42919978b0a4c76a1419cef08f`), one commit before `e8f381590e`; the two differ only in `AP_VESC` and
+`ArduSub/VESC_CAN_V1.md`, so everything this script depends on (scripting, battery monitor, arming, MAVLink definitions) is identical.
+Installing a firmware (`install_firmware_from_file`, also `waf --upload-blueos`) only copies the ELF into that folder and never touches `scripts/`, so the
+scripts survive firmware updates (this is from the BlueOS 1.4.3 source: `FirmwareInstall.install_firmware` is a `shutil.copy` of the ELF); it was **not** tested by updating.
+
+**The router has no endpoint for the pods.** `mavlink-server` listens on `127.0.0.1:8852` (autopilot), `0.0.0.0:14550` (UDP server), `127.0.0.1:14001`,
+`0.0.0.0:14660` and TCP `127.0.0.1:5777`; **nothing listens on UDP 14560**. The pods' frames do reach the Pi (a passive `tcpdump` on the Pi
+showed them on 14560: HEARTBEAT 21 bytes, BATTERY_STATUS 53, NAMED_VALUE_INT 27-28) but nothing consumes them. In BlueOS, add an endpoint of type
+**UDP Server**, address `0.0.0.0`, port **14560** (the pods send to it) before installing the script.
+
+Read-only checks, from the BlueOS "red-pill" terminal (host shell) or SSH as `pi` (`sudo` works without a password):
 
 ```
 docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}'
 docker inspect blueos-core --format '{{range .Mounts}}{{.Type}} {{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'
-docker exec blueos-core sh -c 'for p in /proc/[0-9]*; do if tr "\0" " " < $p/cmdline | grep -q ardusub; then echo "pid ${p#/proc/}"; tr "\0" " " < $p/cmdline; echo; readlink $p/cwd; fi; done'
-docker exec blueos-core ls -la /root/.config/ardupilot-manager/firmware /root/.config/ardupilot-manager/firmware/scripts
-ls -la "$(docker inspect blueos-core --format '{{range .Mounts}}{{if eq .Destination "/root/.config"}}{{.Source}}{{end}}{{end}}')/ardupilot-manager/firmware"
 curl -s http://localhost/version-chooser/v1.0/version/current
+for p in $(pgrep -f '^/root/.config.*ardupilot_navigator64'); do sudo tr '\0' ' ' < /proc/$p/cmdline; echo; sudo readlink /proc/$p/cwd; done
+sudo ls -la /root/.config/blueos/ardupilot-manager/firmware /root/.config/blueos/ardupilot-manager/firmware/scripts
+sudo sha256sum /root/.config/blueos/ardupilot-manager/firmware/ardupilot_navigator64
+sudo ss -lunp | grep -E '14560|14550'
 ```
-
-The `.Source` of the `/root/.config` mount is the host directory to use below (`HOSTCFG`); the `cwd` printed by `readlink` must be
-`/root/.config/ardupilot-manager/firmware`. If it is not, the scripts directory is `<that cwd>/scripts`.
 
 ### Procedure: install (nothing is installed by this repo)
 
-1. Save the current parameters (ground station or `pymavlink` `PARAM_REQUEST_LIST`) so that they can be restored.
-2. On the Pi host, with `HOSTCFG` = the mount source found above:
+1. Save the current parameters (`PARAM_REQUEST_LIST`, see the evidence capture of 2026-11-21) so that they can be restored. On the vehicle
+   `SCR_ENABLE = 0` and `BATT_MONITOR = BATT2_MONITOR = 0`; `ARMING_SKIPCHK` is the default 16776767.
+2. In BlueOS add the UDP Server endpoint on 14560 (above) and check that the pods' frames arrive (`tcpdump`, or MAVLink Inspector).
+3. On the Pi host:
    ```
-   sudo mkdir -p "$HOSTCFG/ardupilot-manager/firmware/scripts/modules/MAVLink"
-   sudo cp pod_battery.lua "$HOSTCFG/ardupilot-manager/firmware/scripts/"
-   sudo cp mavlink_msgs.lua mavlink_msg_BATTERY_STATUS.lua mavlink_msg_NAMED_VALUE_INT.lua \
-       "$HOSTCFG/ardupilot-manager/firmware/scripts/modules/MAVLink/"
+   D=/root/.config/blueos/ardupilot-manager/firmware/scripts
+   sudo mkdir -p $D/modules/MAVLink
+   sudo cp pod_battery.lua $D/
+   sudo cp mavlink_msgs.lua mavlink_msg_BATTERY_STATUS.lua mavlink_msg_NAMED_VALUE_INT.lua $D/modules/MAVLink/
    ```
-   (files only need to be readable by root in the container).
-3. Set the vehicle parameters of `pod_battery.parm` (BlueOS Autopilot parameters, Cockpit or a ground station). `SCR_ENABLE = 1` only
-   takes effect after a reboot **of the autopilot** (restart the autopilot from BlueOS; the Pi and the containers are not restarted).
-4. After the restart check: the text `PodBatt: started`, `BATTERY_STATUS` for id 0 and 1 with the pod voltage (compare with the pod ENV
-   and a multimeter), no `Lua: ... exceeded time limit`.
+4. **Two steps for the parameters**, because most of them do not exist until the first restart:
+   - first set `SCR_ENABLE = 1`, `BATT_MONITOR = 29`, `BATT2_MONITOR = 29` and restart **the autopilot** (BlueOS; the Pi and the containers are not restarted);
+   - after the restart `SCR_HEAP_SIZE`, `SCR_VM_I_COUNT` and the `BATT_*` / `BATT2_*` groups exist: set `BATT_CAPACITY = 0`, `BATT2_CAPACITY = 0`
+     (**the default is 3300 mAh**, which would give a false remaining percentage) and confirm the four `*_FS_*_ACT` are 0 (they are by default;
+     `BATT_LOW_VOLT` and `BATT_CRT_VOLT` default to 0 on ArduSub).
+   `ARMING_SKIPCHK` is a separate decision (see "Arming"): until the battery bit is skipped, a battery that is not healthy blocks arming, which includes
+   the time between the first restart and the arrival of the pods' data.
+5. Check: the text `PodBatt: started`, `BATTERY_STATUS` for id 0 and 1 with the pod voltage (compare with the pod ENV and a multimeter), no
+   `Lua: ... exceeded time limit`.
 
 ### Procedure: remove
 
-1. Disarmed. Set `BATT_MONITOR = 0`, `BATT2_MONITOR = 0`, restore `ARMING_SKIPCHK` to the value saved in step 1 of the install (the ArduSub
-   default is 16776767), and `SCR_ENABLE = 0` only if no other script is installed.
-2. Delete `scripts/pod_battery.lua` (the three modules can stay: nothing loads them without the script) from the host directory.
+1. Disarmed. Set `BATT_MONITOR = 0`, `BATT2_MONITOR = 0`, restore `ARMING_SKIPCHK` to its previous value (16776767 on this vehicle) if it was changed, and
+   `SCR_ENABLE = 0` only if no other script is installed (none is, at the time of writing).
+2. Delete `pod_battery.lua` from the host scripts directory (the three modules can stay: nothing loads them without the script).
 3. Restart the autopilot from BlueOS.
-Removing only the script while `BATT_MONITOR` stays 29 leaves both batteries unhealthy after 5 s; with the `ARMING_SKIPCHK` of this
-file that does not block arming, but it does produce the "missing" warning when armed (see below).
+Removing only the script while `BATT_MONITOR` stays 29 leaves both batteries unhealthy after 5 s: it blocks arming unless the battery check is skipped, and
+produces the "missing" warning when armed (see below).
 
 ## Arming
 

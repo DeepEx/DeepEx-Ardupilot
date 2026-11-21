@@ -1,10 +1,12 @@
 # Vehicle parameters for pod_battery.lua (reference file, ADR-0024). NOT applied automatically.
 # Load with the ground station or copy the lines you need; SCR_ENABLE needs a reboot.
+# On a LIVE vehicle in two steps: BATT_MONITOR=29 makes the BATT_* groups (CAPACITY, FS_*_ACT, ...) appear only after the
+# autopilot restart, so set SCR_ENABLE, BATT_MONITOR, BATT2_MONITOR first, restart, then the rest (see pod_battery.md).
 SCR_ENABLE 1
 # Scripting battery backend for both pod packs
 BATT_MONITOR 29
 BATT2_MONITOR 29
-# The pods' mAh restart at every pod boot: a capacity would give a false 100 %
+# The pods' mAh restart at every pod boot: a capacity would give a false 100 % (the default is 3300 mAh: it MUST be set to 0)
 BATT_CAPACITY 0
 BATT2_CAPACITY 0
 # Battery failsafe actions MUST stay 0 with BATT_MONITOR = 29 (warning only). Why: the voltage seen here is the pack
