@@ -471,6 +471,19 @@ def main():
         res.check("c) change on the second pod is reported for BAT2", wait_for(
             lambda: any("BAT2 power mode SINGLE_BAT2 reason 11" in x for x in vehicle.texts_since(t_c2)), 6))
 
+        # Changes inside the former one-second text limit must each produce exactly one log row and one text.
+        burst_start = time.time()
+        for mode, reason in ((2, 101), (3, 102), (4, 103)):
+            pod1.mode, pod1.reason = mode, reason
+            pod1.send_power()
+            time.sleep(0.2)
+        res.check("c) rapid power changes each produce an INFO text", wait_for(
+            lambda: all(any("BAT1 power mode %s reason %d" % (PWR_NAMES[mode], reason) in text
+                            for text in vehicle.texts_since(burst_start))
+                        for mode, reason in ((2, 101), (3, 102), (4, 103))), 3))
+        pod1.mode, pod1.reason = 2, 7
+        pod1.send_power()
+
         # b) stop a pod while armed: unhealthy within the timeout, no failsafe action
         conn.mav.command_long_send(1, 1, MAV_CMD_COMPONENT_ARM_DISARM, 0, 1, 0, 0, 0, 0, 0, 0)
         armed_ok = wait_for(lambda: vehicle.armed, 8)
@@ -645,6 +658,9 @@ def main():
         res.check("a) log BAT current of battery 0 is 12.34 A",
                   any(abs(c - 12.34) < 0.05 for _, c, _, _ in bat.get(0, [])))
         res.check("c) log has PWRM lines for the two changes", (180, 2, 7) in pwrm and (181, 3, 11) in pwrm, str(pwrm[:8]))
+        res.check("c) rapid power changes each produce exactly one PWRM row",
+                  all(pwrm.count((180, mode, reason)) == 1 for mode, reason in ((2, 101), (3, 102), (4, 103))),
+                  str({reason: pwrm.count((180, mode, reason)) for mode, reason in ((2, 101), (3, 102), (4, 103))}))
         unhealthy = [r for r in bat.get(1, []) if r[3] == 0]
         res.check("3) BAT field H records the health: unhealthy rows exist and all carry 0 V",
                   bool(unhealthy) and all(abs(r[0]) < 0.001 for r in unhealthy) and
