@@ -75,15 +75,14 @@ Reference file: `pod_battery.parm` (not applied automatically; do not apply them
 | Messages from the pods (real rate) | `BATTERY_STATUS` 10 Hz x 2 pods = 20/s; `NAMED_VALUE_INT` 2 names x 2 Hz x 2 pods = 8/s; **28 messages/s** (HEARTBEAT is not received by the script) |
 | Script period | **25 ms** (40 Hz) |
 | `mavlink:init` queue | **25** messages, the maximum the API allows (a second argument of 2 message ids) |
-| Work per call | at most 4 decodes and 60 queue pops (VM budget), 160 decodes/s of capacity against 28/s needed |
+| Work per call | at most 3 CRC checks/decodes and 60 queue pops (VM budget), 120 decodes/s of capacity against 28/s needed |
 
 `SCR_HEAP_SIZE` defaults to 200 KiB on Linux boards and SITL (`AP_Scripting.cpp`), which is enough: the whole Lua heap in use
 (interpreter included) peaked at about 60 KB, 12 KB used per run (`SCR` log rows, `SCR_DEBUG_OPTS` bit 3). No change needed.
 
 One run of a script is limited to `SCR_VM_I_COUNT` (10000 by default) VM instructions and ArduSub **stops the script** that goes over
 (`Lua: ./scripts/pod_battery.lua exceeded time limit`). The first version did exactly that under load; the script now drops
-messages of other senders after a few instructions, decodes at most 4 per call, and skips the CRC re-check in Lua (the C parser
-only hands over frames whose CRC it has already verified; the Lua CRC loop was about 40 % of a decode).
+messages of other senders after a few instructions, decodes at most 4 per call, and bounds work per call. The earlier claim that the C parser only hands over verified frames was incorrect: this fork explicitly passes BAD_CRC packets to scripting. The applet now verifies CRC before decoding, with a three-message budget.
 
 SITL load test (`Tools/scripts/deepex_pod_battery_sitl.py --scenario load`, 60 s): pods at **3x** the real rate (30 Hz per pod,
 84 msg/s) plus 125 `NAMED_VALUE_INT`/s from other components (4 compids with sysid 1 and one foreign system claiming compid 180):
@@ -214,11 +213,21 @@ This also means that a battery which is really low does not block arming by itse
 ## Test
 
 `Tools/scripts/deepex_pod_battery_sitl.py` starts the SITL `ardusub` (`./waf sub`) with this script and emulates both pods (truncated MAVLink 2
-payloads, 41 of 54 bytes for `BATTERY_STATUS`). `--scenario functional` (default, 39 checks): `ARMING_SKIPCHK` before/after, arming, the batteries,
+payloads, 41 of 54 bytes for `BATTERY_STATUS`). `--scenario functional` (default, 43 checks): `ARMING_SKIPCHK` before/after, arming, the batteries,
 the timeout, power-mode reporting (including rapid changes with exactly one log row and INFO text per observed change),
 foreign senders, the failsafe scenarios, the DataFlash log (`BAT` with `H`, `PWRM`, `PBAT`, `SCR`).
-`--scenario load`: the 3x test above. Needs pymavlink.
+`--scenario load`: the 3x test above, including an assertion that the emulator actually reaches its requested rate. Needs pymavlink.
 
 MAVLink 2 truncation: the sender drops trailing zero bytes of the payload. In the `mavlink_message_t` that reaches Lua those bytes are
 already zeros (the C parser zero-fills the packet to the full message length, `mavlink_helpers.h`), and the script also zero-fills the
 payload before decoding, so it does not depend on that. `mavlink_msgs.decode()` is not used and is unchanged.
+
+## CRC diagnosis follow-up (21/11/2026)
+
+The fork passes `MAVLINK_FRAMING_BAD_CRC` packets to scripting so that scripts can handle dialects unknown to C++.
+Our message types are known: their CRC must be checked in Lua. CRC is checked against the transmitted header and
+payload before zero-filling. Rejected packets do not update measurements, freshness or power state.
+`PBAT.Crc` counts rejected packets per pod; `PBAD` records metadata for the first three rejects per pod per script start.
+CRC validates integrity, not sender authentication. Functional SITL includes corrupt-CRC messages with a matching
+sysid/compid/id: they cannot replace voltage or prevent the normal timeout.
+See [POD_BATTERY_CRC_DIAGNOSIS_20261121.md](POD_BATTERY_CRC_DIAGNOSIS_20261121.md) for evidence and limits.

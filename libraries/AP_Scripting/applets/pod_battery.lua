@@ -82,11 +82,10 @@ local NaN = 0 / 0  -- "not known" for the scripting battery backend (consumed_ma
 
 local UPDATE_PERIOD_MS = 25        -- 40 Hz
 local QUEUE_DEPTH = 25             -- mavlink:init queue depth (the API maximum)
--- A script call is limited to SCR_VM_I_COUNT VM instructions (10000 by default; over it ArduSub stops the script).
--- A decode costs ~1000 instructions, so keep the number of DECODES per call small: the pods send ~28 messages/s
--- (84/s at 3x), a call every 25 ms decodes up to 4, i.e. 160/s. Messages from other senders are dropped after a few
--- instructions and do not use the decode budget: pop up to MAX_POPS_PER_UPDATE.
-local MAX_DECODES_PER_UPDATE = 4
+-- A script call is limited to SCR_VM_I_COUNT (10000 by default). CRC checking is mandatory:
+-- cap accepted-sender packets at three per call (120/s capacity at 40 Hz, versus 28/s nominal).
+-- Foreign senders are dropped before CRC/decoding and have a separate queue-pop bound.
+local MAX_DECODES_PER_UPDATE = 3
 local MAX_POPS_PER_UPDATE = 60
 local STATS_LOG_PERIOD_MS = 1000   -- PBAT log row per pod
 
@@ -117,10 +116,24 @@ for msgid, name in pairs(msg_map) do
     full_len[msgid] = n
 end
 
--- Decode the fields of a message with the generated definition (same field mapping as mavlink_msgs.decode()), but
--- WITHOUT re-computing the CRC in Lua: the C parser only hands over frames whose CRC it has already verified
--- (GCS_MAVLINK::raw_packetReceived -> AP_Scripting::handle_message), and the Lua CRC loop is about 40 % of the cost
--- of a decode, which is what the per-call VM instruction limit is spent on.
+-- The fork deliberately delivers BAD_CRC packets to scripting for unknown dialects.
+-- Our two messages have known definitions: verify the transmitted header/payload before zero-filling or decoding.
+local function valid_crc(raw, def)
+    local plen = string.byte(raw, 4)
+    if #raw < 12 + plen then return false end
+    local magic = string.byte(raw, 3)
+    local wire
+    if magic == 0xFD then
+        wire = string.sub(raw, 4, 12 + plen)
+    elseif magic == 0xFE then
+        wire = string.char(plen) .. string.sub(raw, 7, 10) .. string.sub(raw, 13, 12 + plen)
+    else
+        return false
+    end
+    return mavlink_msgs.generateCRC(wire .. string.char(def.crc_extra)) == string.unpack("<I2", raw)
+end
+
+-- Decode only after CRC verification, using the generated field definitions.
 local function decode_fields(raw, def)
     local result = {}
     local offset = 13
@@ -172,7 +185,7 @@ for idx = 0, 1 do
         pwr_pub_mode = nil, pwr_pub_rsn = nil,     -- last reported pair
         pwr_pending = false,
         id_mismatch_warned = false,
-        n_batt = 0, n_named = 0, n_ignored = 0,
+        n_batt = 0, n_named = 0, n_ignored = 0, n_crc = 0,
     }
 end
 local decode_budget_hits = 0       -- calls that stopped popping because the decode budget was used up
@@ -242,7 +255,15 @@ local function drain_messages()
             local t_ms = now_ms()
             local msgid = string.unpack("<I3", raw, 10)
             local def = defs[msgid]
-            if def ~= nil then
+            if def ~= nil and not valid_crc(raw, def) then
+                local p = packs[idx]
+                p.n_crc = p.n_crc + 1
+                if p.n_crc <= 3 then
+                    logger:write("PBAD", "Comp,Msg,Len,Id,Sum", "BHBBH", compid, msgid,
+                                 string.byte(raw, 4), msgid == BATTERY_STATUS_ID and string.byte(raw, 45) or 255,
+                                 (string.unpack("<I2", raw)))
+                end
+            elseif def ~= nil then
                 local ok, parsed = pcall(decode_fields, zero_fill_payload(raw), def)
                 if ok then
                     if msgid == BATTERY_STATUS_ID then
@@ -360,9 +381,9 @@ local function log_stats(t_ms)
         local p = packs[idx]
         local age = -1
         if p.rx_ms ~= nil then age = t_ms - p.rx_ms end
-        logger:write("PBAT", "Comp,Healthy,AgeMs,RxB,RxN,Ign,Cap", "BBiIIII",
+        logger:write("PBAT", "Comp,Healthy,AgeMs,RxB,RxN,Ign,Cap,Crc", "BBiIIIII",
                      idx == 0 and COMPID_BAT1 or COMPID_BAT2, p.healthy and 1 or 0, age,
-                     p.n_batt, p.n_named, p.n_ignored, decode_budget_hits)
+                     p.n_batt, p.n_named, p.n_ignored, decode_budget_hits, p.n_crc)
     end
 end
 
