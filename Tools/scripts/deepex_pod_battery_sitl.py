@@ -75,11 +75,11 @@ class Pod:
         self.last_frame_payload_len = None
         self.sent_battery = 0
         self.sent_named = 0
-        self.t0 = time.time()
+        self.t0 = time.monotonic()
         self._lock = threading.Lock()
 
     def _boot_ms(self):
-        return int((time.time() - self.t0) * 1000)
+        return int((time.monotonic() - self.t0) * 1000)
 
     def send_battery(self):
         voltages = [self.voltage_mv] + [65535] * 9
@@ -102,6 +102,14 @@ class Pod:
         self.mav.named_value_int_send(self._boot_ms(), b"PWR_MODE", self.mode)
         self.mav.named_value_int_send(self._boot_ms(), b"PWR_RSN", self.reason)
         self.sent_named += 2
+
+    def send_bad_crc_battery(self):
+        msg = mavutil.mavlink.MAVLink_battery_status_message(
+            self.battery_id, 1, 3, self.temp_cdeg, [11111] + [65535] * 9, 999, 123, -1, -1,
+            0, 1, [0, 0, 0, 0], 0, 0)
+        frame = bytearray(msg.pack(self.mav))
+        frame[-1] ^= 0x40
+        self.mav.file.write(bytes(frame))
 
     def send_heartbeat(self):
         self.mav.heartbeat_send(mavutil.mavlink.MAV_TYPE_GENERIC, mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0,
@@ -172,17 +180,24 @@ def run_load(args, res, vehicle, emu, pod1, pod2, ctx):
                                  for i in (0, 1)), 20)
     res.check("load: both batteries reported", ready)
     time.sleep(2.0)
-    t_load = time.time()
+    t_load = time.monotonic()
+    counts0 = (pod1.sent_battery, pod2.sent_battery, flood.sent)
     low0 = vehicle.sys_health_low_samples
     zero_samples = 0
     samples = 0
-    while time.time() < t_load + args.load_seconds:
+    while time.monotonic() < t_load + args.load_seconds:
         for i, pod in ((0, pod1), (1, pod2)):
             b, _ = vehicle.get_battery(i)
             samples += 1
             if b is None or b.voltages[0] != pod.voltage_mv:
                 zero_samples += 1
         time.sleep(0.05)
+    elapsed = time.monotonic() - t_load
+    rates = [(pod1.sent_battery - counts0[0]) / elapsed, (pod2.sent_battery - counts0[1]) / elapsed]
+    foreign_rate = (flood.sent - counts0[2]) / elapsed
+    res.check("load: emulator actually achieved 3x pod rate and foreign traffic",
+              min(rates) >= 27 and foreign_rate >= 112.5,
+              "elapsed %.2f s, pods %.2f/%.2f Hz, foreign %.2f/s" % (elapsed, rates[0], rates[1], foreign_rate))
     # judge BEFORE stopping the pods (the silence after the stop is expected)
     texts = vehicle.texts_since(t_load)
     health_low = vehicle.sys_health_low_samples - low0
@@ -234,9 +249,9 @@ class Vehicle(threading.Thread):
             with self.lock:
                 if t == "BATTERY_STATUS":
                     self.battery[m.id] = m
-                    self.battery_t[m.id] = time.time()
+                    self.battery_t[m.id] = time.monotonic()
                 elif t == "STATUSTEXT":
-                    self.texts.append((time.time(), m.severity, m.text))
+                    self.texts.append((time.monotonic(), m.severity, m.text))
                 elif t == "HEARTBEAT" and m.get_srcComponent() == 1:
                     self.armed = bool(m.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
                     self.custom_mode = m.custom_mode
@@ -281,8 +296,8 @@ def set_param(conn, name, value):
 
 
 def wait_for(cond, timeout, step=0.1):
-    end = time.time() + timeout
-    while time.time() < end:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         if cond():
             return True
         time.sleep(step)
@@ -390,7 +405,7 @@ def main():
         emu = mavutil.mavlink_connection("tcp:127.0.0.1:5762", source_system=1, source_component=180)
         pod1 = Pod(emu, master=True)
         pod2 = Pod(emu, master=False)
-        t_start = time.time()
+        t_start = time.monotonic()
         res.check("script started", wait_for(lambda: any("PodBatt: started" in x for x in vehicle.texts_since(0)), 40),
                   "; ".join(vehicle.texts_since(0)[-3:]))
 
@@ -430,10 +445,28 @@ def main():
         res.check("a) battery monitors healthy (SYS_STATUS)", wait_for(
             lambda: vehicle.sys_health & MAV_SYS_STATUS_SENSOR_BATTERY, 5))
 
+        # The fork intentionally delivers BAD_CRC packets to scripting for unknown dialects.
+        # Such frames must neither update known battery values nor keep the pod healthy.
+        pod1.alive = False
+        time.sleep(0.2)
+        pod1.send_bad_crc_battery()
+        time.sleep(0.4)
+        res.check("CRC: corrupted packet cannot replace battery voltage",
+                  vehicle.get_battery(0)[0].voltages[0] != 11111)
+        corrupt_until = time.monotonic() + args.timeout_ms / 1000.0 + 0.5
+        while time.monotonic() < corrupt_until:
+            pod1.send_bad_crc_battery()
+            time.sleep(0.1)
+        res.check("CRC: corrupted traffic does not refresh the battery timeout", wait_for(
+            lambda: vehicle.get_battery(0)[0].voltages[0] in (0, 65535), 1.0))
+        pod1.alive = True
+        res.check("CRC: valid packets restore the correct battery reading", wait_for(
+            lambda: vehicle.get_battery(0)[0].voltages[0] == pod1.voltage_mv, 4))
+
         # d) foreign senders are ignored
         v_before = vehicle.get_battery(0)[0].voltages[0]
         c_before = vehicle.get_battery(0)[0].current_battery
-        t_d = time.time()
+        t_d = time.monotonic()
         for _ in range(30):
             for sysid, compid in ((1, 190), (2, 180), (1, 100), (255, 181)):
                 foreign = mavutil.mavlink.MAVLink(emu, srcSystem=sysid, srcComponent=compid)
@@ -461,18 +494,18 @@ def main():
                   "battery 1 mV %d" % b1b.voltages[0])
 
         # c) power mode change -> text message and PWRM log line
-        t_c = time.time()
+        t_c = time.monotonic()
         pod1.mode, pod1.reason = 2, 7
         res.check("c) PWR_MODE change gives a text message", wait_for(
             lambda: any("BAT1 power mode SINGLE_BAT1 reason 7" in x for x in vehicle.texts_since(t_c)), 6),
             "; ".join(vehicle.texts_since(t_c)[-3:]))
-        t_c2 = time.time()
+        t_c2 = time.monotonic()
         pod2.mode, pod2.reason = 3, 11
         res.check("c) change on the second pod is reported for BAT2", wait_for(
             lambda: any("BAT2 power mode SINGLE_BAT2 reason 11" in x for x in vehicle.texts_since(t_c2)), 6))
 
         # Changes inside the former one-second text limit must each produce exactly one log row and one text.
-        burst_start = time.time()
+        burst_start = time.monotonic()
         for mode, reason in ((2, 101), (3, 102), (4, 103)):
             pod1.mode, pod1.reason = mode, reason
             pod1.send_power()
@@ -491,14 +524,14 @@ def main():
                   "acks %s; %s" % (vehicle.acks.get(MAV_CMD_COMPONENT_ARM_DISARM),
                                    "; ".join(vehicle.texts_since(t_start)[-4:])))
         mode_before = vehicle.custom_mode
-        t_b = time.time()
+        t_b = time.monotonic()
         pod2.alive = False
         unhealthy_at = []
 
         def bat2_unhealthy():
             b, t = vehicle.get_battery(1)
-            if b is not None and b.voltages[0] in (0, 65535) and time.time() - t < 1.0:
-                unhealthy_at.append(time.time() - t_b)
+            if b is not None and b.voltages[0] in (0, 65535) and time.monotonic() - t < 1.0:
+                unhealthy_at.append(time.monotonic() - t_b)
                 return True
             return False
         res.check("b) pod stopped -> battery 2 not healthy", wait_for(bat2_unhealthy, args.timeout_ms / 1000.0 + 3.0),
@@ -519,11 +552,11 @@ def main():
                   "armed=%s mode %s->%s texts=%s" % (vehicle.armed, mode_before, vehicle.custom_mode, bad))
         b0_now, t0_now = vehicle.get_battery(0)
         res.check("b) ... battery 1 (other pod) unaffected", b0_now.voltages[0] == pod1.voltage_mv and
-                  time.time() - t0_now < 1.0)
+                  time.monotonic() - t0_now < 1.0)
 
         # e) arming with an unhealthy battery: accepted, the battery check is skipped by ARMING_SKIPCHK
         res.check("disarm", arm(conn, vehicle, False, 8))
-        t_e = time.time()
+        t_e = time.monotonic()
         res.check("e) normal arming ACCEPTED while a pod (battery 2) is silent", arm(conn, vehicle, True, 8),
                   "; ".join(vehicle.texts_since(t_e)[-3:]))
         res.check("e) ... no 'Battery N unhealthy' arming message",
@@ -551,7 +584,7 @@ def main():
         def silent_pod_scenario(label):
             arm(conn, vehicle, True, 8)
             mode0 = vehicle.custom_mode
-            t0 = time.time()
+            t0 = time.monotonic()
             pod2.alive = False
             wait_for(lambda: any("Battery 2 is missing" in x for x in vehicle.texts_since(t0)), 10)
             time.sleep(6.0)  # well past BATT_LOW_TIMER (2 s)
@@ -578,7 +611,7 @@ def main():
         # S3: the pod is alive and reports a REAL low voltage, actions non-zero: the failsafe acts
         arm(conn, vehicle, True, 8)
         mode0 = vehicle.custom_mode
-        t3 = time.time()
+        t3 = time.monotonic()
         pod2.voltage_mv = 39000
         res.check("S3 real low voltage (39 V < BATT_LOW_VOLT 40) with action Surface: warning text", wait_for(
             lambda: any("Battery 2 is low" in x for x in vehicle.texts_since(t3)), 10),
@@ -627,7 +660,8 @@ def main():
             elif m.get_type() == "BAT":
                 bat.setdefault(m.Inst, []).append((m.Volt, m.Curr, m.CurrTot, m.H))
             elif m.get_type() == "PBAT":
-                pbat.setdefault(m.Comp, []).append((m.Healthy, m.AgeMs, m.RxB, m.RxN, m.Ign, m.Cap))
+                pbat.setdefault(m.Comp, []).append((m.Healthy, m.AgeMs, m.RxB, m.RxN, m.Ign, m.Cap,
+                                                   getattr(m, "Crc", 0)))
             else:
                 pwrm.append((m.Comp, m.Mode, m.Rsn))
 
@@ -669,6 +703,7 @@ def main():
         res.check("3) PBAT rows (1 Hz) carry Healthy/AgeMs/counters for both pods",
                   len(pbat.get(180, [])) > 10 and len(pbat.get(181, [])) > 10 and
                   any(h == 0 for h, *_ in pbat.get(181, [])) and any(h == 1 for h, *_ in pbat.get(181, [])))
+        res.check("CRC: PBAT records rejected CRC packets", any(row[6] > 0 for row in pbat.get(180, [])))
 
     mine = [r for r in scr if "pod_battery" in str(r[0])]
     if mine:
