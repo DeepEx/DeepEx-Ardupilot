@@ -18,12 +18,13 @@ The inherited implementation is unchanged by this review.
 
 ## Findings requiring follow-up
 
-1. **Arming policy differs from the supplied task.** `pod_battery.parm` adds
-   `ARMING_SKIPCHK=16777023`, skipping the battery check. The task reserved that decision to the owner.
+1. **Arming policy resolved by the owner, 2026-11-21.** A missing or unhealthy pod battery must
+   notify without preventing ROV arming. `pod_battery.parm` adds
+   `ARMING_SKIPCHK=16777023`, skipping only the battery check relative to the ArduSub default;
+   RC and board-voltage checks remain enabled. This matches the clarified policy.
    This is a reference parameter file, not a C++ change; it was not applied to a vehicle in this review.
-   Whether the owner subsequently authorized it is not established by the supplied conversation.
-   The inherited SITL test expects permissive arming, so its green result does not demonstrate compliance
-   with the original request to retain the battery check.
+   Preserve any other existing vehicle check bits when configuring it: add bit 256 to the current
+   mask rather than replacing a non-default mask. Warning notifications remain available.
 2. **Power-state reporting is not one event per change.** In `pod_battery.lua`, function
    `report_power_state` (reviewed lines 318–342), `logger:write("PWRM", ...)` precedes the text
    rate limiter, but `pwr_pub_mode`/`pwr_pub_rsn` are updated only when a text is sent.
@@ -133,5 +134,5 @@ python Tools/scripts/check_branch_conventions.py --base-branch e8f381590e
 ```
 
 The two generated message files were compared with `cmp`; `mavlink_msgs.lua` was not modified.
-Follow-up is to resolve the owner's arming-policy decision and correct/test change reporting
+Follow-up is to correct/test change reporting and resolve the loop-period deviation
 before treating the entire supplied task as complete. Deployment and physical checks remain with the owner.
