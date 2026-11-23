@@ -188,13 +188,14 @@ sudo ss -lunp | grep -E '14560|14550'
    ```
 4. **Two steps for the parameters**, because most of them do not exist until the first restart:
    - first set `SCR_ENABLE = 1`, `BATT_MONITOR = 29`, `BATT2_MONITOR = 29`, `BATT3_MONITOR = 29` and restart **the autopilot** (BlueOS; the Pi and the containers are not restarted);
-   - after the restart `SCR_HEAP_SIZE`, `SCR_VM_I_COUNT` and the `BATT_*` / `BATT2_*` groups exist: set `BATT_CAPACITY = 0`, `BATT2_CAPACITY = 0`
-     (**the default is 3300 mAh**, which would give a false remaining percentage) and confirm the four `*_FS_*_ACT` are 0 (they are by default;
+   - after the restart `SCR_HEAP_SIZE`, `SCR_VM_I_COUNT` and the `BATT_*` / `BATT2_*` / `BATT3_*` groups exist: set `BATT_CAPACITY = 0`,
+     `BATT2_CAPACITY = 0`, `BATT3_CAPACITY = 0` (**the default is 3300 mAh**, which would give a false remaining percentage), set
+     `MOT_BAT_CURR_MAX = 28`, `MOT_BAT_CURR_TC = 0.5`, and confirm the six `*_FS_*_ACT` are 0 (they are by default;
      `BATT_LOW_VOLT` and `BATT_CRT_VOLT` default to 0 on ArduSub).
    `ARMING_SKIPCHK` is a separate decision (see "Arming"): until the battery bit is skipped, a battery that is not healthy blocks arming, which includes
    the time between the first restart and the arrival of the pods' data.
-5. Check: the text `PodBatt: started`, `BATTERY_STATUS` for id 0 and 1 with the pod voltage (compare with the pod ENV and a multimeter), no
-   `Lua: ... exceeded time limit`.
+5. Check: the text `PodBatt: started`, `BATTERY_STATUS` for id 1 (BAT1) and 2 (BAT2) with the pod voltage and current (compare with the pod ENV
+   and a multimeter), id 0 (virtual) with the highest voltage and the current of the most loaded pack, no `Lua: ... exceeded time limit`.
 
 ### Procedure: remove
 
