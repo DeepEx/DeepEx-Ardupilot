@@ -50,6 +50,11 @@ SKIPCHK_BATTERY_BIT = 1 << 8
 SKIPCHK_EXPECTED = 16777023   # ArduSub default 16776767 | 256
 SUB_MODE_SURFACE = 9
 
+# Battery instances published by pod_battery.lua (BATTERY_STATUS.id, BAT log Inst, "Battery N" texts are N = inst + 1)
+BI_VIRT = 0   # BATT_ : virtual "most loaded pack", input of MOT_BAT_CURR_MAX
+BI_BAT1 = 1   # BATT2_: master pod (compid 180)
+BI_BAT2 = 2   # BATT3_: slave pod (compid 181)
+
 
 def describe_mask(mask):
     checked = [n for b, n in ARM_CHECKS.items() if not mask & (1 << b)]
@@ -169,6 +174,60 @@ class ScenarioDone(Exception):
     pass
 
 
+SUB_MODE_MANUAL = 19
+
+
+def thrust_level(conn, vehicle, seconds, settle):
+    """Full forward stick (RC5 1900) for `seconds`; mean |PWM - 1500| of the four horizontal thrusters after `settle`."""
+    t0 = time.monotonic()
+    samples = []
+    while time.monotonic() - t0 < seconds:
+        conn.mav.rc_channels_override_send(1, 1, 1500, 1500, 1500, 1500, 1900, 1500, 0, 0)
+        if time.monotonic() - t0 >= settle and vehicle.servo is not None:
+            samples.append(sum(abs(x - 1500) for x in vehicle.servo) / 4.0)
+        time.sleep(0.05)
+    return sum(samples) / len(samples) if samples else -1
+
+
+def run_limiter(res, conn, vehicle, pod1, pod2):
+    """MOT_BAT_CURR_MAX on the virtual primary moves the motor outputs (ADR-0016 level 2), FRAME_CONFIG 1.
+    The emulated pods report a fixed current that does not follow the thrust: over the limit the integrator
+    drives the output down to zero, which proves the coupling, not the tuning (that is a bench item)."""
+    conn.mav.command_long_send(1, 1, MAV_CMD_SET_MESSAGE_INTERVAL, 0, 36, 50000, 0, 0, 0, 0, 0)
+    for name in ("FRAME_CONFIG", "MOT_BAT_CURR_MAX", "MOT_BAT_CURR_TC"):
+        conn.mav.param_request_read_send(1, 1, name.encode(), -1)
+    time.sleep(1.0)
+    print("INFO limiter: FRAME_CONFIG %s, MOT_BAT_CURR_MAX %s, MOT_BAT_CURR_TC %s" % tuple(
+        vehicle.params.get(n) for n in ("FRAME_CONFIG", "MOT_BAT_CURR_MAX", "MOT_BAT_CURR_TC")), flush=True)
+    conn.set_mode(SUB_MODE_MANUAL)
+    res.check("limiter: armed in MANUAL with both pods", arm(conn, vehicle, True, 10))
+    full = thrust_level(conn, vehicle, 3.0, 1.5)
+    res.check("limiter: packs 12.3/5.5 A (< 28 A) -> full forward thrust", full >= 380, "|PWM-1500| %.0f" % full)
+    pod1.current_ca = 4000
+    low = thrust_level(conn, vehicle, 3.0, 2.0)
+    res.check("limiter: BAT1 40 A (> 28 A) -> outputs scaled down", low < 0.5 * full,
+              "|PWM-1500| %.0f (full %.0f)" % (low, full))
+    pod1.current_ca = 1234
+    back = thrust_level(conn, vehicle, 6.0, 4.0)
+    res.check("limiter: current back under the limit -> full thrust again", back >= 0.95 * full, "|PWM-1500| %.0f" % back)
+    pod2.current_ca = 4000
+    low2 = thrust_level(conn, vehicle, 3.0, 2.0)
+    res.check("limiter: BAT2 40 A -> also scaled (the most loaded pack drives the limit)", low2 < 0.5 * full,
+              "|PWM-1500| %.0f" % low2)
+    pod2.current_ca = 550
+    thrust_level(conn, vehicle, 6.0, 6.0)
+    t_s = time.monotonic()
+    pod1.alive = pod2.alive = False
+    silent = thrust_level(conn, vehicle, 4.0, 2.5)
+    res.check("limiter: both pods silent -> limiter inactive, full thrust (owner: notify only)",
+              silent >= 0.95 * full and
+              any("no pack current, current limit off" in x for x in vehicle.texts_since(t_s)),
+              "|PWM-1500| %.0f; %s" % (silent, [x for x in vehicle.texts_since(t_s) if "PodBatt" in x][-2:]))
+    res.check("limiter: ... still armed in MANUAL", vehicle.armed and vehicle.custom_mode == SUB_MODE_MANUAL)
+    pod1.alive = pod2.alive = True
+    arm(conn, vehicle, False, 8)
+
+
 def run_load(args, res, vehicle, emu, pod1, pod2, ctx):
     """Pods at 3x their real rate (BATTERY_STATUS 30 Hz, PWR_MODE/PWR_RSN 6 Hz each) plus 125 NAMED_VALUE_INT/s from
     other components, for --load-seconds. No false timeout, no queue loss."""
@@ -177,7 +236,7 @@ def run_load(args, res, vehicle, emu, pod1, pod2, ctx):
     runner.start()
     flood.start()
     ready = wait_for(lambda: all(vehicle.get_battery(i)[0] is not None and vehicle.get_battery(i)[0].voltages[0] > 0
-                                 for i in (0, 1)), 20)
+                                 for i in (BI_BAT1, BI_BAT2)), 20)
     res.check("load: both batteries reported", ready)
     time.sleep(2.0)
     t_load = time.monotonic()
@@ -186,7 +245,7 @@ def run_load(args, res, vehicle, emu, pod1, pod2, ctx):
     zero_samples = 0
     samples = 0
     while time.monotonic() < t_load + args.load_seconds:
-        for i, pod in ((0, pod1), (1, pod2)):
+        for i, pod in ((BI_BAT1, pod1), (BI_BAT2, pod2)):
             b, _ = vehicle.get_battery(i)
             samples += 1
             if b is None or b.voltages[0] != pod.voltage_mv:
@@ -233,6 +292,7 @@ class Vehicle(threading.Thread):
         self.acks = {}
         self.params = {}
         self.sys_health_low_samples = 0
+        self.servo = None        # last SERVO_OUTPUT_RAW (servo1..4 = horizontal thrusters)
         self.lock = threading.Lock()
 
     def run(self):
@@ -264,6 +324,8 @@ class Vehicle(threading.Thread):
                     self.sys_present = m.onboard_control_sensors_present
                 elif t == "COMMAND_ACK":
                     self.acks[m.command] = m.result
+                elif t == "SERVO_OUTPUT_RAW":
+                    self.servo = (m.servo1_raw, m.servo2_raw, m.servo3_raw, m.servo4_raw)
 
     def texts_since(self, t0):
         with self.lock:
@@ -342,8 +404,9 @@ def parse_args():
     ap.add_argument("--ardusub", default=ARDUSUB)
     ap.add_argument("--keep", action="store_true", help="keep the scratch directory")
     ap.add_argument("--timeout-ms", type=int, default=1000, help="PBAT_TIMEOUT_MS under test")
-    ap.add_argument("--scenario", choices=("functional", "load"), default="functional",
-                    help="functional: all checks; load: pods at 3x rate + foreign NAMED_VALUE_INT traffic")
+    ap.add_argument("--scenario", choices=("functional", "load", "limiter"), default="functional",
+                    help="functional: all checks; load: pods at 3x rate + foreign NAMED_VALUE_INT traffic; "
+                         "limiter: MOT_BAT_CURR_MAX on the virtual primary scales the motor outputs")
     ap.add_argument("--load-seconds", type=int, default=30)
     return ap.parse_args()
 
@@ -416,6 +479,13 @@ def main():
         if args.scenario == "load":
             runner, flood = run_load(args, res, vehicle, emu, pod1, pod2, load_ctx)
             raise ScenarioDone()
+        if args.scenario == "limiter":
+            runner = PodRunner([pod1, pod2])
+            runner.start()
+            wait_for(lambda: vehicle.get_battery(BI_VIRT)[0] is not None and
+                     vehicle.get_battery(BI_VIRT)[0].voltages[0] == pod1.voltage_mv, 20)
+            run_limiter(res, conn, vehicle, pod1, pod2)
+            raise ScenarioDone()
 
         # arming with both pods absent since boot (battery check skipped by ARMING_SKIPCHK)
         res.check("arming accepted with both pods absent from boot",
@@ -428,9 +498,9 @@ def main():
         # a) batteries 0 and 1 reported by ArduSub with the right values
         def have_both():
             return all(vehicle.get_battery(i)[0] is not None and vehicle.get_battery(i)[0].voltages[0] != 65535 and
-                       vehicle.get_battery(i)[0].voltages[0] > 0 for i in (0, 1))
-        res.check("a) ArduSub reports BATTERY_STATUS 0 and 1 with a voltage", wait_for(have_both, 20))
-        for idx, pod in ((0, pod1), (1, pod2)):
+                       vehicle.get_battery(i)[0].voltages[0] > 0 for i in (BI_VIRT, BI_BAT1, BI_BAT2))
+        res.check("a) ArduSub reports BATTERY_STATUS 0, 1 and 2 with a voltage", wait_for(have_both, 20))
+        for idx, pod in ((BI_BAT1, pod1), (BI_BAT2, pod2)):
             b, _ = vehicle.get_battery(idx)
             if b is None:
                 res.check("a) battery %d values" % idx, False, "no message")
@@ -445,6 +515,42 @@ def main():
         res.check("a) battery monitors healthy (SYS_STATUS)", wait_for(
             lambda: vehicle.sys_health & MAV_SYS_STATUS_SENSOR_BATTERY, 5))
 
+        # v) virtual primary (battery 0): most loaded pack among the healthy ones with a valid current
+        def virt():
+            return vehicle.get_battery(BI_VIRT)[0]
+
+        def virt_ok():
+            b = virt()
+            return (b is not None and abs(b.current_battery - pod1.current_ca) <= 2 and
+                    b.voltages[0] == max(pod1.voltage_mv, pod2.voltage_mv) and
+                    b.current_consumed == pod1.consumed_mah + pod2.consumed_mah and
+                    abs(b.temperature - max(pod1.temp_cdeg, pod2.temp_cdeg)) <= 2)
+        ok_v = wait_for(virt_ok, 3)   # the id 0 message may predate the second pod by one stream period
+        bv = virt()
+        res.check("v) virtual = most loaded pack: current of BAT1, bus voltage = highest, mAh sum, highest temperature",
+                  ok_v,
+                  "cA %s mV %s mAh %s cdegC %s" % (
+                      (bv.current_battery, bv.voltages[0], bv.current_consumed, bv.temperature) if bv else ("-",) * 4))
+        pod2.current_ca = 2500
+        res.check("v) the source follows the most loaded pack (BAT2 25 A > BAT1 12.34 A)", wait_for(
+            lambda: abs(virt().current_battery - 2500) <= 2, 3), "cA %d" % virt().current_battery)
+        pod2.current_ca = 550
+        wait_for(lambda: abs(virt().current_battery - pod1.current_ca) <= 2, 3)
+        t_v = time.monotonic()
+        pod1.current_ca = pod2.current_ca = -1
+        res.check("v) no valid pack current -> virtual unhealthy (limiter input off) with a warning", wait_for(
+            lambda: virt().voltages[0] in (0, 65535) and
+            any("no pack current, current limit off" in x for x in vehicle.texts_since(t_v)), 4),
+            "mV %d; %s" % (virt().voltages[0], [x for x in vehicle.texts_since(t_v) if "PodBatt" in x][-2:]))
+        res.check("v) ... the pack monitors stay healthy (voltage still valid)",
+                  vehicle.get_battery(BI_BAT1)[0].voltages[0] == pod1.voltage_mv and
+                  vehicle.get_battery(BI_BAT2)[0].voltages[0] == pod2.voltage_mv)
+        t_v = time.monotonic()
+        pod1.current_ca, pod2.current_ca = 1234, 550
+        res.check("v) pack current back -> virtual healthy again with an info text", wait_for(
+            lambda: virt().voltages[0] == pod1.voltage_mv and
+            any("pack current available, limiter input on" in x for x in vehicle.texts_since(t_v)), 4))
+
         # The fork intentionally delivers BAD_CRC packets to scripting for unknown dialects.
         # Such frames must neither update known battery values nor keep the pod healthy.
         pod1.alive = False
@@ -452,20 +558,20 @@ def main():
         pod1.send_bad_crc_battery()
         time.sleep(0.4)
         res.check("CRC: corrupted packet cannot replace battery voltage",
-                  vehicle.get_battery(0)[0].voltages[0] != 11111)
+                  vehicle.get_battery(BI_BAT1)[0].voltages[0] != 11111)
         corrupt_until = time.monotonic() + args.timeout_ms / 1000.0 + 0.5
         while time.monotonic() < corrupt_until:
             pod1.send_bad_crc_battery()
             time.sleep(0.1)
         res.check("CRC: corrupted traffic does not refresh the battery timeout", wait_for(
-            lambda: vehicle.get_battery(0)[0].voltages[0] in (0, 65535), 1.0))
+            lambda: vehicle.get_battery(BI_BAT1)[0].voltages[0] in (0, 65535), 1.0))
         pod1.alive = True
         res.check("CRC: valid packets restore the correct battery reading", wait_for(
-            lambda: vehicle.get_battery(0)[0].voltages[0] == pod1.voltage_mv, 4))
+            lambda: vehicle.get_battery(BI_BAT1)[0].voltages[0] == pod1.voltage_mv, 4))
 
         # d) foreign senders are ignored
-        v_before = vehicle.get_battery(0)[0].voltages[0]
-        c_before = vehicle.get_battery(0)[0].current_battery
+        v_before = vehicle.get_battery(BI_BAT1)[0].voltages[0]
+        c_before = vehicle.get_battery(BI_BAT1)[0].current_battery
         t_d = time.monotonic()
         for _ in range(30):
             for sysid, compid in ((1, 190), (2, 180), (1, 100), (255, 181)):
@@ -475,12 +581,12 @@ def main():
                 foreign.named_value_int_send(1, b"PWR_MODE", 4)
                 foreign.named_value_int_send(1, b"PWR_RSN", 99)
             time.sleep(0.1)
-        b0, _ = vehicle.get_battery(0)
-        b1, _ = vehicle.get_battery(1)
-        res.check("d) messages with another sysid/compid are ignored (battery 0 unchanged)",
+        b0, _ = vehicle.get_battery(BI_BAT1)
+        b1, _ = vehicle.get_battery(BI_BAT2)
+        res.check("d) messages with another sysid/compid are ignored (BAT1 unchanged)",
                   b0.voltages[0] == v_before and b0.current_battery == c_before and b0.current_consumed == pod1.consumed_mah,
                   "mV %d (expected %d) cA %d (expected %d)" % (b0.voltages[0], v_before, b0.current_battery, c_before))
-        res.check("d) ... and battery 1 unchanged",
+        res.check("d) ... and BAT2 unchanged",
                   b1.voltages[0] == pod2.voltage_mv and b1.current_battery == pod2.current_ca)
         res.check("d) ... and no power-state text from foreign senders",
                   not any("power mode NONE reason 99" in x for x in vehicle.texts_since(t_d)))
@@ -489,9 +595,9 @@ def main():
         for _ in range(10):
             liar.battery_status_send(0, 1, 2, 1000, [11111] + [65535] * 9, 100, 5, -1, -1, 0, 1, [0, 0, 0, 0], 0, 0)
             time.sleep(0.1)
-        b1b, _ = vehicle.get_battery(1)
+        b1b, _ = vehicle.get_battery(BI_BAT2)
         res.check("d) compid/id mismatch refused (no BAT1/BAT2 swap)", b1b.voltages[0] != 11111,
-                  "battery 1 mV %d" % b1b.voltages[0])
+                  "BAT2 mV %d" % b1b.voltages[0])
 
         # c) power mode change -> text message and PWRM log line
         t_c = time.monotonic()
@@ -529,18 +635,18 @@ def main():
         unhealthy_at = []
 
         def bat2_unhealthy():
-            b, t = vehicle.get_battery(1)
+            b, t = vehicle.get_battery(BI_BAT2)
             if b is not None and b.voltages[0] in (0, 65535) and time.monotonic() - t < 1.0:
                 unhealthy_at.append(time.monotonic() - t_b)
                 return True
             return False
-        res.check("b) pod stopped -> battery 2 not healthy", wait_for(bat2_unhealthy, args.timeout_ms / 1000.0 + 3.0),
+        res.check("b) pod stopped -> BAT2 (battery 3) not healthy", wait_for(bat2_unhealthy, args.timeout_ms / 1000.0 + 3.0),
                   "after %.2f s (timeout %.2f s)" % (unhealthy_at[0] if unhealthy_at else -1, args.timeout_ms / 1000.0))
         res.check("b) ... SYS_STATUS battery health bit cleared", wait_for(
             lambda: not (vehicle.sys_health & MAV_SYS_STATUS_SENSOR_BATTERY), 4))
         # armed + unhealthy for more than 5 s: ArduPilot's own "missing" warning (action 0 = no action in Sub)
-        res.check("b) ... ArduPilot warns 'Battery 2 is missing' after its 5 s health timeout (armed)", wait_for(
-            lambda: any("Battery 2 is missing" in x for x in vehicle.texts_since(t_b)), 8),
+        res.check("b) ... ArduPilot warns 'Battery 3 is missing' after its 5 s health timeout (armed)", wait_for(
+            lambda: any("Battery 3 is missing" in x for x in vehicle.texts_since(t_b)), 8),
             "; ".join(x for x in vehicle.texts_since(t_b) if "Battery" in x))
         time.sleep(1.0)
         texts_b = vehicle.texts_since(t_b)
@@ -550,34 +656,38 @@ def main():
         res.check("b) ... no failsafe action: still armed, same mode, no failsafe text",
                   vehicle.armed and vehicle.custom_mode == mode_before and not bad,
                   "armed=%s mode %s->%s texts=%s" % (vehicle.armed, mode_before, vehicle.custom_mode, bad))
-        b0_now, t0_now = vehicle.get_battery(0)
-        res.check("b) ... battery 1 (other pod) unaffected", b0_now.voltages[0] == pod1.voltage_mv and
+        b0_now, t0_now = vehicle.get_battery(BI_BAT1)
+        res.check("b) ... BAT1 (other pod) unaffected", b0_now.voltages[0] == pod1.voltage_mv and
                   time.monotonic() - t0_now < 1.0)
+        bv_now, _ = vehicle.get_battery(BI_VIRT)
+        res.check("b) ... virtual stays healthy on the remaining pack (single pack, limiter still on)",
+                  bv_now.voltages[0] == pod1.voltage_mv and abs(bv_now.current_battery - pod1.current_ca) <= 2,
+                  "mV %d cA %d" % (bv_now.voltages[0], bv_now.current_battery))
 
         # e) arming with an unhealthy battery: accepted, the battery check is skipped by ARMING_SKIPCHK
         res.check("disarm", arm(conn, vehicle, False, 8))
         t_e = time.monotonic()
-        res.check("e) normal arming ACCEPTED while a pod (battery 2) is silent", arm(conn, vehicle, True, 8),
+        res.check("e) normal arming ACCEPTED while a pod (BAT2) is silent", arm(conn, vehicle, True, 8),
                   "; ".join(vehicle.texts_since(t_e)[-3:]))
         res.check("e) ... no 'Battery N unhealthy' arming message",
                   not any("unhealthy" in x for x in vehicle.texts_since(t_e)))
         arm(conn, vehicle, False, 8)
         # the pod comes back
         pod2.alive = True
-        res.check("pod back -> battery 2 reports the pod voltage again", wait_for(
-            lambda: vehicle.get_battery(1)[0].voltages[0] == pod2.voltage_mv, 8))
+        res.check("pod back -> BAT2 reports the pod voltage again", wait_for(
+            lambda: vehicle.get_battery(BI_BAT2)[0].voltages[0] == pod2.voltage_mv, 8))
         time.sleep(2.0)
         latched = not (vehicle.sys_health & MAV_SYS_STATUS_SENSOR_BATTERY)
         print("INFO SYS_STATUS battery health bit after the pod is back (failsafe 'missing' fired while armed): %s" % (
             "still cleared (latched)" if latched else "set"), flush=True)
-        conn.mav.command_long_send(1, 1, 42651, 0, 2, 100, 0, 0, 0, 0, 0)  # MAV_CMD_BATTERY_RESET, battery 2
+        conn.mav.command_long_send(1, 1, 42651, 0, 1 << BI_BAT2, 100, 0, 0, 0, 0, 0)  # MAV_CMD_BATTERY_RESET, BAT2
         res.check("pod back -> health bit set again after MAV_CMD_BATTERY_RESET (or already set)", wait_for(
             lambda: vehicle.sys_health & MAV_SYS_STATUS_SENSOR_BATTERY, 6),
             "sys_health 0x%x" % vehicle.sys_health)
 
         # 2) low-voltage failsafe vs a silent pod (published as 0 V, healthy=false)
         for name, value in (("BATT_LOW_VOLT", 40), ("BATT_CRT_VOLT", 35), ("BATT_LOW_TIMER", 2),
-                            ("BATT2_LOW_VOLT", 40), ("BATT2_CRT_VOLT", 35), ("BATT2_LOW_TIMER", 2)):
+                            ("BATT3_LOW_VOLT", 40), ("BATT3_CRT_VOLT", 35), ("BATT3_LOW_TIMER", 2)):
             set_param(conn, name, value)
         time.sleep(1.0)
 
@@ -586,7 +696,7 @@ def main():
             mode0 = vehicle.custom_mode
             t0 = time.monotonic()
             pod2.alive = False
-            wait_for(lambda: any("Battery 2 is missing" in x for x in vehicle.texts_since(t0)), 10)
+            wait_for(lambda: any("Battery 3 is missing" in x for x in vehicle.texts_since(t0)), 10)
             time.sleep(6.0)  # well past BATT_LOW_TIMER (2 s)
             texts = vehicle.texts_since(t0)
             low = [x for x in texts if "is low" in x or "is critical" in x]
@@ -595,15 +705,15 @@ def main():
                       "armed=%s mode %s->%s texts=%s" % (vehicle.armed, mode0, vehicle.custom_mode,
                                                          [x for x in texts if "Battery" in x]))
             pod2.alive = True
-            wait_for(lambda: vehicle.get_battery(1)[0].voltages[0] == pod2.voltage_mv, 8)
-            conn.mav.command_long_send(1, 1, 42651, 0, 3, 100, 0, 0, 0, 0, 0)
+            wait_for(lambda: vehicle.get_battery(BI_BAT2)[0].voltages[0] == pod2.voltage_mv, 8)
+            conn.mav.command_long_send(1, 1, 42651, 0, 7, 100, 0, 0, 0, 0, 0)
             time.sleep(1.5)
             arm(conn, vehicle, False, 8)
 
         silent_pod_scenario("S1 BATT_LOW_VOLT=40, actions 0")
-        for name in ("BATT_FS_LOW_ACT", "BATT2_FS_LOW_ACT"):
+        for name in ("BATT_FS_LOW_ACT", "BATT3_FS_LOW_ACT"):
             set_param(conn, name, 3)   # Surface
-        for name in ("BATT_FS_CRT_ACT", "BATT2_FS_CRT_ACT"):
+        for name in ("BATT_FS_CRT_ACT", "BATT3_FS_CRT_ACT"):
             set_param(conn, name, 2)   # Disarm
         time.sleep(1.0)
         silent_pod_scenario("S2 actions Surface/Disarm")
@@ -614,18 +724,18 @@ def main():
         t3 = time.monotonic()
         pod2.voltage_mv = 39000
         res.check("S3 real low voltage (39 V < BATT_LOW_VOLT 40) with action Surface: warning text", wait_for(
-            lambda: any("Battery 2 is low" in x for x in vehicle.texts_since(t3)), 10),
+            lambda: any("Battery 3 is low" in x for x in vehicle.texts_since(t3)), 10),
             "; ".join(x for x in vehicle.texts_since(t3) if "Battery" in x))
         time.sleep(1.5)
-        print("INFO S3 real low voltage with BATT2_FS_LOW_ACT=3 (Surface): mode %s -> %s, armed=%s "
+        print("INFO S3 real low voltage with BATT3_FS_LOW_ACT=3 (Surface): mode %s -> %s, armed=%s "
               "(the SITL vehicle is already at the surface, so Surface = %d completes at once into ALT_HOLD = 2, "
               "ArduSub/mode_surface.cpp)" % (mode0, vehicle.custom_mode, vehicle.armed, SUB_MODE_SURFACE), flush=True)
         res.check("S3 ... the action fires (mode leaves MANUAL: Surface requested)", vehicle.custom_mode != mode0)
         pod2.voltage_mv = 49870
-        for name in ("BATT_FS_LOW_ACT", "BATT2_FS_LOW_ACT", "BATT_FS_CRT_ACT", "BATT2_FS_CRT_ACT"):
+        for name in ("BATT_FS_LOW_ACT", "BATT3_FS_LOW_ACT", "BATT_FS_CRT_ACT", "BATT3_FS_CRT_ACT"):
             set_param(conn, name, 0)
         time.sleep(1.0)
-        conn.mav.command_long_send(1, 1, 42651, 0, 3, 100, 0, 0, 0, 0, 0)
+        conn.mav.command_long_send(1, 1, 42651, 0, 7, 100, 0, 0, 0, 0, 0)
         arm(conn, vehicle, False, 8)
         time.sleep(1.0)
     except ScenarioDone:
@@ -648,7 +758,7 @@ def main():
     logs = []
     for d, _, files in os.walk(work):
         logs += [os.path.join(d, f) for f in files if f.endswith(".BIN")]
-    bat, pwrm, scr, pbat = {0: [], 1: []}, [], [], {180: [], 181: []}
+    bat, pwrm, scr, pbat = {BI_VIRT: [], BI_BAT1: [], BI_BAT2: []}, [], [], {180: [], 181: []}
     crc_counts = {180: 0, 181: 0}
     if logs:
         reader = DFReader.DFReader_binary(sorted(logs)[-1])
@@ -668,7 +778,9 @@ def main():
             else:
                 pwrm.append((m.Comp, m.Mode, m.Rsn))
 
-    if args.scenario == "load":
+    if args.scenario == "limiter":
+        pass
+    elif args.scenario == "load":
         for comp, pod in ((180, load_ctx.get("pod1")), (181, load_ctx.get("pod2"))):
             rows = pbat.get(comp, [])
             if not rows or pod is None:
@@ -688,21 +800,24 @@ def main():
                       all(h == 1 for h, age, *_ in rows[load_ctx.get("skip_rows", 3):-4]),
                       "unhealthy rows %d" % sum(1 for h, *_ in rows[load_ctx.get("skip_rows", 3):-4] if h == 0))
     else:
-        res.check("a) log has BAT rows for battery 0 and 1 with the pod voltage",
-                  any(abs(v - 50.123) < 0.01 for v, _, _, _ in bat.get(0, [])) and
-                  any(abs(v - 49.87) < 0.01 for v, _, _, _ in bat.get(1, [])),
-                  "BAT0 rows %d, BAT1 rows %d" % (len(bat.get(0, [])), len(bat.get(1, []))))
-        res.check("a) log BAT current of battery 0 is 12.34 A",
-                  any(abs(c - 12.34) < 0.05 for _, c, _, _ in bat.get(0, [])))
+        res.check("a) log has BAT rows for Inst 1 (BAT1) and 2 (BAT2) with the pod voltage",
+                  any(abs(v - 50.123) < 0.01 for v, _, _, _ in bat.get(BI_BAT1, [])) and
+                  any(abs(v - 49.87) < 0.01 for v, _, _, _ in bat.get(BI_BAT2, [])),
+                  "Inst1 rows %d, Inst2 rows %d" % (len(bat.get(BI_BAT1, [])), len(bat.get(BI_BAT2, []))))
+        res.check("a) log BAT current of Inst 1 (BAT1) is 12.34 A",
+                  any(abs(c - 12.34) < 0.05 for _, c, _, _ in bat.get(BI_BAT1, [])))
+        res.check("v) log BAT Inst 0 (virtual) carries the most loaded pack: 12.34 A at the bus voltage 50.123 V",
+                  any(abs(c - 12.34) < 0.05 and abs(v - 50.123) < 0.01 for v, c, _, _ in bat.get(BI_VIRT, [])),
+                  "Inst0 rows %d" % len(bat.get(BI_VIRT, [])))
         res.check("c) log has PWRM lines for the two changes", (180, 2, 7) in pwrm and (181, 3, 11) in pwrm, str(pwrm[:8]))
         res.check("c) rapid power changes each produce exactly one PWRM row",
                   all(pwrm.count((180, mode, reason)) == 1 for mode, reason in ((2, 101), (3, 102), (4, 103))),
                   str({reason: pwrm.count((180, mode, reason)) for mode, reason in ((2, 101), (3, 102), (4, 103))}))
-        unhealthy = [r for r in bat.get(1, []) if r[3] == 0]
+        unhealthy = [r for r in bat.get(BI_BAT2, []) if r[3] == 0]
         res.check("3) BAT field H records the health: unhealthy rows exist and all carry 0 V",
                   bool(unhealthy) and all(abs(r[0]) < 0.001 for r in unhealthy) and
-                  any(r[3] == 1 and r[0] > 40 for r in bat.get(1, [])),
-                  "BAT1 rows %d, H=0 rows %d" % (len(bat.get(1, [])), len(unhealthy)))
+                  any(r[3] == 1 and r[0] > 40 for r in bat.get(BI_BAT2, [])),
+                  "Inst2 rows %d, H=0 rows %d" % (len(bat.get(BI_BAT2, [])), len(unhealthy)))
         res.check("3) PBAT rows (1 Hz) carry Healthy/AgeMs/counters for both pods",
                   len(pbat.get(180, [])) > 10 and len(pbat.get(181, [])) > 10 and
                   any(h == 0 for h, *_ in pbat.get(181, [])) and any(h == 1 for h, *_ in pbat.get(181, [])))
