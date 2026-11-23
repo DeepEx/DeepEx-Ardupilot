@@ -19,6 +19,7 @@ ArduPilot is safety-critical autopilot software controlling real vehicles. Every
 - [9. Interacting with Maintainers & Developers](#9-interacting-with-maintainers--developers)
 - [10. What AI Should NOT Do](#10-what-ai-should-not-do)
 - [11. DeepEx Firmware Artifact Naming](#11-deepex-firmware-artifact-naming)
+- [12. DeepEx Agent Checkpoints and Handoffs](#12-deepex-agent-checkpoints-and-handoffs)
 
 ---
 
@@ -405,3 +406,11 @@ Open a discussion before writing code if:
 - The binary is copied unchanged next to a `.sha256` file and a `.manifest.json` file. Do not rename, edit or replace archived files.
 - Never archive a build from a working tree with uncommitted changes, and never overwrite an existing entry with different content: rebuild from a clean commit instead.
 - Archiving is not deployment. Installing a firmware on a vehicle still requires explicit authorization.
+
+---
+
+## 12. DeepEx Agent Checkpoints and Handoffs
+
+For extended, multi-session, high-cost, or interrupted DeepEx work, follow the centrally governed [Agent checkpoints and handoffs protocol](https://github.com/DeepEx/DeepEx-System/blob/main/CONTRIBUTING.md#agent-checkpoints-and-handoffs). Keep an objective-owned persistent `CURRENT.md` and phase checkpoints recording verified Git/operational state, tests, blockers, authorizations, and the next executable action. On resumption, verify actual state and reuse existing branches and Plane tasks instead of repeating completed work.
+
+This cross-repository reference does not override repository-specific or upstream safety rules, Work Package constraints, or authorization requirements. Do not publish secrets or private evidence; a checkpoint does not authorize external writes, push, PR, merge, deployment, or service changes.
