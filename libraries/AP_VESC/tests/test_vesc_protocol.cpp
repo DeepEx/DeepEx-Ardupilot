@@ -99,7 +99,7 @@ TEST(VESCProtocol, DecodeStatus4)
 
 TEST(VESCProtocol, DecodeStatus5Protocols)
 {
-    const uint8_t data[] {0xFF, 0xFF, 0xCF, 0xC7, 0x01, 0xF4, 0xA5, 0x07};
+    const uint8_t data[] {0xFF, 0xFF, 0xCF, 0xC7, 0x01, 0xF4, 0x02, 0x07};
     const AP_HAL::CANFrame frame(AP_HAL::CANFrame::FlagEFF | (27U << 8) | 5U,
                                  data, sizeof(data));
     AP_VESC_Protocol::Status5 standard {};
@@ -111,12 +111,57 @@ TEST(VESCProtocol, DecodeStatus5Protocols)
     EXPECT_EQ(standard.tachometer, -12345);
     EXPECT_FLOAT_EQ(standard.input_voltage, 50.0f);
     EXPECT_EQ(standard.fault_code, 0);
-    EXPECT_EQ(standard.warning_flags, 0);
+    EXPECT_EQ(standard.last_fault_code, 0);
 
     ASSERT_TRUE(AP_VESC_Protocol::decode_status_5(
                     frame, AP_VESC_Protocol::Protocol::DEEPEX_V1, deepex));
     EXPECT_EQ(deepex.fault_code, 7);
-    EXPECT_EQ(deepex.warning_flags, 0xA5);
+    EXPECT_EQ(deepex.last_fault_code, 2);
+}
+
+TEST(VESCProtocol, DecodeStatus5LastFaultCode)
+{
+    // IF-0014 §6.2: byte 6 = last_fault_code (UNDER_VOLTAGE), byte 7 = fault in corso
+    const uint8_t data[] {0x00, 0x00, 0x00, 0x2A, 0x00, 0xFA, 0x02, 0x12};
+    const AP_HAL::CANFrame frame(AP_HAL::CANFrame::FlagEFF | (27U << 8) | 1U,
+                                 data, sizeof(data));
+    AP_VESC_Protocol::Status5 deepex {};
+    AP_VESC_Protocol::Status5 standard {};
+    ASSERT_TRUE(AP_VESC_Protocol::decode_status_5(
+                    frame, AP_VESC_Protocol::Protocol::DEEPEX_V1, deepex));
+    EXPECT_EQ(deepex.last_fault_code, 2);
+    EXPECT_EQ(deepex.fault_code, 18);
+    ASSERT_TRUE(AP_VESC_Protocol::decode_status_5(
+                    frame, AP_VESC_Protocol::Protocol::STANDARD, standard));
+    EXPECT_EQ(standard.last_fault_code, 0);
+    EXPECT_EQ(standard.fault_code, 0);
+}
+
+TEST(VESCProtocol, LastFaultCodeDoesNotBlock)
+{
+    // fault_code == 0 with latched last_fault_code: active_fault is derived from
+    // fault_code only (AP_VESC::handle_frame), so nothing blocks.
+    const uint8_t data[] {0x00, 0x00, 0x00, 0x2A, 0x00, 0xFA, 0x02, 0x00};
+    AP_VESC_Protocol::Status5 status {};
+    ASSERT_TRUE(AP_VESC_Protocol::decode_status_5(
+                    AP_HAL::CANFrame(AP_HAL::CANFrame::FlagEFF | (27U << 8) | 1U,
+                                     data, sizeof(data)),
+                    AP_VESC_Protocol::Protocol::DEEPEX_V1, status));
+    EXPECT_EQ(status.fault_code, 0);
+    EXPECT_EQ(status.last_fault_code, 2);
+
+    AP_VESC_Protocol::ControllerState state {};
+    state.fault_code = status.fault_code;
+    state.last_fault_code = status.last_fault_code;
+    state.active_fault = status.fault_code != 0;
+    state.configured = true;
+    state.expected = true;
+    state.present = true;
+    float out[AP_VESC_Protocol::MAVLINK_EXTENSION_LENGTH];
+    AP_VESC_Protocol::pack_mavlink_extension(state, out);
+    EXPECT_EQ(uint16_t(out[3]) & 64U, 0U);   // no FAULT state
+    EXPECT_FLOAT_EQ(out[18], 0);
+    EXPECT_FLOAT_EQ(out[19], 2);
 }
 
 TEST(VESCProtocol, DecodeStandardSixByteStatus5)
@@ -131,7 +176,7 @@ TEST(VESCProtocol, DecodeStandardSixByteStatus5)
     EXPECT_EQ(status.tachometer, 42);
     EXPECT_FLOAT_EQ(status.input_voltage, 25.0f);
     EXPECT_EQ(status.fault_code, 0);
-    EXPECT_EQ(status.warning_flags, 0);
+    EXPECT_EQ(status.last_fault_code, 0);
 }
 
 TEST(VESCProtocol, StatusTypeRejectsMalformedFrames)
@@ -286,7 +331,7 @@ TEST(VESCProtocol, MAVLinkExtensionContract)
     state.pid_position = 24.68f;
     state.tachometer = -12345;
     state.fault_code = 7;
-    state.warning_flags = 0xA5;
+    state.last_fault_code = 2;
     state.last_status1_ms = 100;
     state.last_status2_ms = 200;
     state.last_status3_ms = 300;
@@ -322,7 +367,7 @@ TEST(VESCProtocol, MAVLinkExtensionContract)
     EXPECT_FLOAT_EQ(data[16], 24.68f);
     EXPECT_FLOAT_EQ(data[17], -12345);
     EXPECT_FLOAT_EQ(data[18], 7);
-    EXPECT_FLOAT_EQ(data[19], 0xA5);
+    EXPECT_FLOAT_EQ(data[19], 2);
     EXPECT_FLOAT_EQ(data[20], 100);
     EXPECT_FLOAT_EQ(data[21], 400);
     EXPECT_FLOAT_EQ(data[22], 500);
@@ -342,7 +387,7 @@ TEST(VESCProtocol, MAVLinkExtensionContract)
         EXPECT_FLOAT_EQ(data[i], 0);
     }
     EXPECT_FLOAT_EQ(data[18], 7);
-    EXPECT_FLOAT_EQ(data[19], 0xA5);
+    EXPECT_FLOAT_EQ(data[19], 2);
     EXPECT_FLOAT_EQ(data[20], 100);
     EXPECT_FLOAT_EQ(data[24], 300);
 }
@@ -475,6 +520,72 @@ TEST(VESCProtocol, SelectNextMotorPerCursorChannelsAreIndependent)
     EXPECT_EQ(motor, 0);
     ASSERT_TRUE(AP_VESC_Protocol::select_next_motor(sparse_cursor_a, sparse_mask, 4, motor));
     EXPECT_EQ(motor, 3);
+}
+
+
+TEST(VESCProtocol, BlockReasons)
+{
+    AP_VESC_Protocol::CommandConditions conditions {
+        true, false, true, true, false, true, true,
+    };
+    EXPECT_EQ(AP_VESC_Protocol::block_reasons(conditions), 0);
+    EXPECT_TRUE(AP_VESC_Protocol::allow_nonzero_command(conditions));
+
+    conditions.armed = false;
+    EXPECT_EQ(AP_VESC_Protocol::block_reasons(conditions), AP_VESC_Protocol::BLOCK_DISARMED);
+    conditions.armed = true;
+    conditions.emergency_stop = true;
+    EXPECT_EQ(AP_VESC_Protocol::block_reasons(conditions), AP_VESC_Protocol::BLOCK_EMERGENCY_STOP);
+    conditions.emergency_stop = false;
+    conditions.command_fresh = false;
+    EXPECT_EQ(AP_VESC_Protocol::block_reasons(conditions), AP_VESC_Protocol::BLOCK_COMMAND_STALE);
+    conditions.command_fresh = true;
+    conditions.interface_available = false;
+    EXPECT_EQ(AP_VESC_Protocol::block_reasons(conditions), AP_VESC_Protocol::BLOCK_NO_INTERFACE);
+    conditions.interface_available = true;
+    conditions.interface_down = true;
+    EXPECT_EQ(AP_VESC_Protocol::block_reasons(conditions), AP_VESC_Protocol::BLOCK_BUS_OFF);
+    conditions.interface_down = false;
+    conditions.tx_healthy = false;
+    EXPECT_EQ(AP_VESC_Protocol::block_reasons(conditions), AP_VESC_Protocol::BLOCK_TX_UNHEALTHY);
+    conditions.tx_healthy = true;
+    conditions.all_controllers_ready = false;
+    EXPECT_EQ(AP_VESC_Protocol::block_reasons(conditions), AP_VESC_Protocol::BLOCK_NOT_READY);
+
+    // several reasons accumulate, and gating is consistent with the reasons
+    conditions.armed = false;
+    conditions.tx_healthy = false;
+    EXPECT_EQ(AP_VESC_Protocol::block_reasons(conditions),
+              AP_VESC_Protocol::BLOCK_DISARMED |
+              AP_VESC_Protocol::BLOCK_TX_UNHEALTHY |
+              AP_VESC_Protocol::BLOCK_NOT_READY);
+    EXPECT_EQ(AP_VESC_Protocol::safe_command_erpm(5000, conditions), 0);
+}
+
+TEST(VESCProtocol, LogRecordRateLimit)
+{
+    EXPECT_TRUE(AP_VESC_Protocol::log_record_due(1000, 0, 100, false));
+    EXPECT_FALSE(AP_VESC_Protocol::log_record_due(1099, 1000, 100, false));
+    EXPECT_TRUE(AP_VESC_Protocol::log_record_due(1100, 1000, 100, false));
+    EXPECT_TRUE(AP_VESC_Protocol::log_record_due(1001, 1000, 100, true));
+    // wrap of the millisecond counter
+    EXPECT_FALSE(AP_VESC_Protocol::log_record_due(10, UINT32_MAX - 20, 100, false));
+    EXPECT_TRUE(AP_VESC_Protocol::log_record_due(100, UINT32_MAX - 20, 100, false));
+}
+
+TEST(VESCProtocol, SetRPMFrameMatchesLoggedCommand)
+{
+    // the final command recorded in the log is exactly what is encoded on the bus
+    for (const int32_t erpm : { -17000, -1, 0, 1, 8500, 17000 }) {
+        AP_HAL::CANFrame frame;
+        ASSERT_TRUE(AP_VESC_Protocol::make_set_rpm_frame(3, erpm, frame));
+        const int32_t decoded = int32_t((uint32_t(frame.data[0]) << 24) |
+                                        (uint32_t(frame.data[1]) << 16) |
+                                        (uint32_t(frame.data[2]) << 8) |
+                                        uint32_t(frame.data[3]));
+        EXPECT_EQ(decoded, erpm);
+        EXPECT_EQ(frame.id & AP_HAL::CANFrame::MaskExtID & 0xFF, 3U);
+    }
 }
 
 AP_GTEST_MAIN()

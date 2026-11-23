@@ -155,8 +155,11 @@ Mechanical RPM is `electrical_eRPM / pole_pairs`. Both signed values are kept.
 
 `STANDARD` accepts the normal six-byte STATUS_5 and an eight-byte frame but
 always ignores bytes 6..7. `DEEPEX_V1` interprets an eight-byte STATUS_5 field
-as a big-endian `uint16`: bits 0..7 are `mc_fault_code`, bits 8..15 are DeepEx
-warning flags. A standard VESC is never treated as DeepEx unless the parameter
+as a big-endian `uint16`: bits 0..7 (byte 7) are the current `mc_fault_code`
+(`fault_code`), bits 8..15 (byte 6) are `last_fault_code`, the last non-zero
+`mc_fault_code` since the VESC booted, cleared only by a VESC restart and used
+for diagnostics only (it never blocks pre-arm). The authoritative definition is
+IF-0014 §6 (DeepEx-System, `interfaces/IF-0014-deepdrive-ardusub-vesc-can-v1-interface.md`). A standard VESC is never treated as DeepEx unless the parameter
 explicitly selects it.
 
 Freshness groups are independent:
@@ -214,9 +217,39 @@ The following global `NAMED_VALUE_INT` values are produced:
 Fields not representable by standard ESC telemetry use the existing MAVLink
 `DEBUG_FLOAT_ARRAY` message without a dialect change. The name is `VESC_V1`,
 `array_id` is the one-based ArduSub motor number, and one selected motor is
-published per INFO cycle. The MAVLink name field is exactly 10 bytes: the seven
+published per scheduler call (see "VESC_V1 scheduling" below). The MAVLink name field is exactly 10 bytes: the seven
 ASCII bytes `VESC_V1` followed by three zero bytes. Consumers must check index
 0 before decoding.
+
+### VESC_V1 scheduling
+
+`VESC_V1` has its own MAVLink message slot (`MSG_VESC_V1`, MAVLink id 350) and
+is no longer sent from the 2 Hz `STREAM_EXTENDED_STATUS` INFO cycle. The
+global `VESC_*` `NAMED_VALUE_INT` values are unchanged and still sent from the
+INFO cycle.
+
+- Default interval: `AP_VESC_MAVLINK_V1_INTERVAL_MS` = 33 ms, applied to every
+  MAVLink channel at start-up. It does not depend on any `SRn_*` parameter.
+- One selected motor is sent per call, in round-robin order. With six motors
+  the cycle is 198 ms, so each motor is refreshed at about 5 Hz (30 messages/s
+  per channel). With N selected motors each is refreshed at about 30/N Hz.
+- The cursor is per channel, so one client does not change the sequence seen
+  by another.
+- `MAV_CMD_SET_MESSAGE_INTERVAL` for message 350 overrides the default on the
+  requesting channel only: interval `0` restores 33 ms, `-1` stops it. The
+  interval is the time between messages of the whole cycle, not per motor.
+  `MAV_CMD_REQUEST_MESSAGE` for 350 sends the next motor once.
+- Buffer full: the scheduler is asked to retry. Payload space is checked
+  before a motor is selected, and the cursor only advances after the message
+  is written, so no motor is skipped or repeated. The message uses the normal
+  deferred-message path and never blocks.
+- Bandwidth: about 265 bytes per message, so about 8 kB/s per channel at the
+  default rate. A client on a slow link should request a longer interval.
+- MAVLink 1 channels cannot carry message 350 (as for any id above 255).
+- Id 350 maps only to `VESC_V1`. ArduSub has no other `DEBUG_FLOAT_ARRAY`
+  producer, and the mapping exists only for ArduSub builds with `AP_VESC`.
+  If another producer is added, a different message-id mapping is needed.
+- The packet contents and indices below are unchanged.
 
 | Index | Value |
 |---:|---|
@@ -239,7 +272,7 @@ ASCII bytes `VESC_V1` followed by three zero bytes. Consumers must check index
 | 16 | PID position |
 | 17 | tachometer |
 | 18 | fault code |
-| 19 | warning flags |
+| 19 | last fault code (diagnostic only) |
 | 20 | last STATUS_1 boot time ms |
 | 21 | last STATUS_4 boot time ms |
 | 22 | last STATUS_5 boot time ms |
@@ -251,7 +284,7 @@ This layout is append-only within version 1. A semantic or scaling change
 requires a new name/version.
 
 Measurement values at indices 4..17 are zero when their corresponding
-freshness group has never become valid or has become stale. Fault and warning
+freshness group has never become valid or has become stale. Fault and last fault
 codes at indices 18..19 retain the last STATUS_5 report for diagnosis;
 timestamps at indices 20..24 retain the last update time. Consumers must use
 the validity bits in index 3 rather than treating zero as a valid measurement.
@@ -386,3 +419,81 @@ while armed.
 This implementation and document were prepared with AI assistance. The human
 submitter remains responsible for understanding, validating, and maintaining
 the change.
+
+## DataFlash command logging
+
+With `VESC_MODE=1` the CAN bridge writes two DataFlash messages from
+`AP_VESC::send_commands()`. Logging is non-blocking (`WriteStreaming` drops a
+record when the logger buffer is full), runs only in the VESC thread, and does
+not change any command, mapping, direction, PID or timing. All other ArduSub
+messages are unchanged. Logging is compiled out when `HAL_LOGGING_ENABLED` is 0.
+
+### VESC (one record per motor)
+
+| Field | Unit | Meaning |
+|---|---|---|
+| TimeUS | us | time since boot |
+| Mot | - | logical motor 1 to 12 (`SERVOn_FUNCTION` Motor1 to Motor12) |
+| ID | - | CAN controller ID used in the SET_RPM frame (`VESC_IDn`) |
+| PWM | PWM us | final mixer output of that motor, 0 if unavailable |
+| Req | eRPM | 1. mixer request: PWM converted with `VESC_IN_*`, `VESC_EXP`, `VESC_MAXRPM`; computed also while disarmed, before any safety gating |
+| Cmd | eRPM | 2. final command placed in the SET_RPM frame, after gating |
+| Blk | bitmask | reasons forcing `Cmd` to 0 (0 = not blocked, see below) |
+| St | enum | readiness: 0 POWERED_OFF, 1 WAITING_TELEMETRY, 2 READY, 3 ARMED, 4 DISARM_FLUSH, 5 FAULT |
+| Tx | enum | 3. SET_RPM result: 0 not addressed, 1 accepted by CAN driver, 2 rejected by driver, 3 invalid controller ID, 4 frame not encoded |
+| TxE | count | cumulative failed SET_RPM transmissions |
+| Rx | eRPM | 4. electrical RPM in the last STATUS_1 received from that controller |
+| RxAge | ms | age of that STATUS_1, 65535 if none received |
+
+`Blk` bits: 1 disarmed, 2 emergency stop, 4 command stale (`VESC_CMD_TO`),
+8 no CAN interface, 16 bus off, 32 recent TX failure, 64 not every selected
+controller has fresh STATUS_1/4/5 and no fault. Several bits can be set.
+
+Semantics and limits:
+
+- `Req` is the mixer request, `Cmd` is what was sent. `Req != Cmd` with
+  `Blk != 0` is a gated command; `Req != Cmd` with `Blk == 0` does not occur.
+- `Tx = 1` means the CAN driver accepted the frame for transmission. It is not
+  a bus acknowledgement; the VESC does not acknowledge SET_RPM. Delivery is
+  confirmed only by `Rx` following `Cmd`.
+- `Rx` is electrical RPM, same unit and sign as `Cmd`. Mechanical RPM is
+  `Rx / VESC_PPAIRS`. The standard `ESC` message carries the same telemetry.
+- The driver addresses one controller per scheduler slot. A record is written
+  for the controller addressed in that slot and for any non-zero request on a
+  controller that was not addressed. Records are written at most every 100 ms per
+  motor (nominal 10 Hz), and immediately when `Blk`, `Tx` or `St` changes.
+  Short command pulses between two records are therefore not individually
+  visible, but each gating or failure transition is.
+
+### VESS (overhead summary, 1 Hz)
+
+| Field | Meaning |
+|---|---|
+| TimeUS | time since boot, us |
+| Rec | cumulative VESC records written |
+| Sup | cumulative VESC records suppressed by the 100 ms limit |
+| MaxUs | worst-case duration of one VESC log call, us |
+
+### Overhead
+
+A VESC record is 37 bytes including the header. Six motors at 10 Hz is
+2220 B/s, plus a
+23 B VESS record per second. This is the worst case without state changes;
+a transition adds one record per affected motor. `VESS.MaxUs` measures the
+log call time on the target; it has not been measured on Navigator hardware.
+
+### Validation
+
+`libraries/AP_VESC/tests/test_vesc_protocol.cpp` covers the `Blk` mapping,
+rate-limit predicate and SET_RPM payload.
+`Tools/autotest/unittest/vesc_log_unittest.py` takes the message definitions
+from `AP_VESC.cpp`, builds a synthetic `.BIN`, decodes it with pymavlink
+`DFReader`, and checks SET_RPM, record and telemetry consistency for nominal,
+disarmed and TX-failure cases.
+
+### Build status
+
+The DataFlash logging code has not been compiled yet. Only the Python decode
+test has been run. Compilation (`waf configure --board navigator64`,
+`waf sub`, and the `AP_VESC` GTest) is pending on a Linux host, to be done from
+the ROV console.

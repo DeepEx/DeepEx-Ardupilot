@@ -194,7 +194,6 @@ bool GCS_MAVLINK_Sub::send_info()
     send_named_float("RFTarget", sub.mode_surftrak.get_rangefinder_target_cm() * 0.01f);
 
 #if AP_VESC_ENABLED
-    static constexpr char vesc_v1_name[10] = "VESC_V1";
     for (uint8_t i = 0; i < AP::can().get_num_drivers(); i++) {
         AP_VESC *vesc = AP_VESC::get_vesc(i);
         if (vesc == nullptr) {
@@ -221,31 +220,54 @@ bool GCS_MAVLINK_Sub::send_info()
         send_named_int("VESC_DIAG", vesc->diagnostic_flags());
         CHECK_PAYLOAD_SIZE(NAMED_VALUE_INT);
         send_named_int("VESC_FLT", vesc->fault_mask());
-
-        // Versioned extension for fields that cannot be represented without
-        // overloading ESC_TELEMETRY. One selected motor is sent per INFO cycle.
-        // next_vesc_motor is per-channel (a member of this GCS_MAVLINK_Sub
-        // instance) so each link independently cycles through every motor.
-        uint8_t motor;
-        if (AP_VESC_Protocol::select_next_motor(next_vesc_motor, expected, AP_VESC::MAX_ESC, motor)) {
-            AP_VESC::ControllerState state {};
-            if (vesc->get_controller_state(motor, state)) {
-                float data[AP_VESC_Protocol::MAVLINK_EXTENSION_LENGTH] {};
-                AP_VESC_Protocol::pack_mavlink_extension(state, data);
-                CHECK_PAYLOAD_SIZE(DEBUG_FLOAT_ARRAY);
-                mavlink_msg_debug_float_array_send(chan,
-                                                   AP_HAL::micros64(),
-                                                   vesc_v1_name,
-                                                   state.motor_number,
-                                                   data);
-            }
-        }
         break;
     }
 #endif
 
     return true;
 }
+
+#if AP_VESC_ENABLED
+// Send VESC_V1 for one selected motor. Called from the MAVLink
+// scheduler at AP_VESC_MAVLINK_V1_INTERVAL_MS (MSG_VESC_V1), so the
+// per-motor rate is the scheduled rate divided by the selected motor
+// count. The cursor is per-channel (a member of this GCS_MAVLINK_Sub
+// instance) so each link independently cycles through every motor.
+// Returning false asks the scheduler to retry this message later.
+bool GCS_MAVLINK_Sub::send_vesc_v1()
+{
+    static constexpr char vesc_v1_name[10] = "VESC_V1";
+
+    // check for space first: the cursor must not move if nothing is sent
+    CHECK_PAYLOAD_SIZE(DEBUG_FLOAT_ARRAY);
+
+    for (uint8_t i = 0; i < AP::can().get_num_drivers(); i++) {
+        AP_VESC *vesc = AP_VESC::get_vesc(i);
+        if (vesc == nullptr) {
+            continue;
+        }
+        uint8_t cursor = next_vesc_motor;
+        uint8_t motor;
+        if (!AP_VESC_Protocol::select_next_motor(cursor, vesc->expected_mask(), AP_VESC::MAX_ESC, motor)) {
+            return true;
+        }
+        AP_VESC::ControllerState state {};
+        if (!vesc->get_controller_state(motor, state)) {
+            return true;
+        }
+        float data[AP_VESC_Protocol::MAVLINK_EXTENSION_LENGTH] {};
+        AP_VESC_Protocol::pack_mavlink_extension(state, data);
+        mavlink_msg_debug_float_array_send(chan,
+                                           AP_HAL::micros64(),
+                                           vesc_v1_name,
+                                           state.motor_number,
+                                           data);
+        next_vesc_motor = cursor;
+        break;
+    }
+    return true;
+}
+#endif  // AP_VESC_ENABLED
 
 #if AP_RANGEFINDER_ENABLED
 void GCS_MAVLINK_Sub::send_water_depth()
@@ -393,6 +415,11 @@ bool GCS_MAVLINK_Sub::try_send_message(enum ap_message id)
     case MSG_NAMED_FLOAT:
         send_info();
         break;
+
+#if AP_VESC_ENABLED
+    case MSG_VESC_V1:
+        return send_vesc_v1();
+#endif
 
     case MSG_WIND: // other vehicles do something custom with wind:
         return true;

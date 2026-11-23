@@ -18,6 +18,8 @@ ArduPilot is safety-critical autopilot software controlling real vehicles. Every
 - [8. Pull Request Guidelines](#8-pull-request-guidelines)
 - [9. Interacting with Maintainers & Developers](#9-interacting-with-maintainers--developers)
 - [10. What AI Should NOT Do](#10-what-ai-should-not-do)
+- [11. DeepEx Firmware Artifact Naming](#11-deepex-firmware-artifact-naming)
+- [12. DeepEx Agent Checkpoints and Handoffs](#12-deepex-agent-checkpoints-and-handoffs)
 
 ---
 
@@ -395,7 +397,19 @@ Open a discussion before writing code if:
 - **Do not add comment on all functions/lines**: Document only what was change and useful for future reading.
 - **Do not duplicate PRs**: If a PR was already open on a feature/bugfix/changes recently, do not duplicate it.
 
-## DeepEx agent checkpoints and handoffs
+---
+
+## 11. DeepEx Firmware Artifact Naming
+
+- Every ArduSub binary compiled for DeepEx use **must** be archived as `ardusub-<commit8>-<target>`, for example `ardusub-77e597d8-navigator64`. `<commit8>` is the first 8 characters of the Git commit the binary was built from and `<target>` is the Waf board.
+- Archive with `Tools/scripts/deepex_package_ardusub.py`, or build and archive in one step with `Tools/scripts/deepex_build_ardusub.sh <board>`. The archive directory (`--archive-dir` or `DEEPEX_FIRMWARE_ARCHIVE`) must be persistent, never a scratch or temporary directory.
+- The binary is copied unchanged next to a `.sha256` file and a `.manifest.json` file. Do not rename, edit or replace archived files.
+- Never archive a build from a working tree with uncommitted changes, and never overwrite an existing entry with different content: rebuild from a clean commit instead.
+- Archiving is not deployment. Installing a firmware on a vehicle still requires explicit authorization.
+
+---
+
+## 12. DeepEx Agent Checkpoints and Handoffs
 
 For extended, multi-session, high-cost, or interrupted DeepEx work, follow the centrally governed [Agent checkpoints and handoffs protocol](https://github.com/DeepEx/DeepEx-System/blob/main/CONTRIBUTING.md#agent-checkpoints-and-handoffs). Keep an objective-owned persistent `CURRENT.md` and phase checkpoints recording verified Git/operational state, tests, blockers, authorizations, and the next executable action. On resumption, verify actual state and reuse existing branches and Plane tasks instead of repeating completed work.
 
