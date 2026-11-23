@@ -21,7 +21,7 @@ mAh is the sum when both are valid. ArduSub's own current limiter (`MOT_BAT_CURR
 uses only the primary battery: with `MOT_BAT_CURR_MAX = 28` it scales all motor outputs, controllers included, to keep every
 pack under 28 A, with one pack or two (a parallel that shares the load unevenly is covered too). It does not depend on
 `PWR_MODE`. With no valid pack current the primary is unhealthy and the limiter does nothing: owner decision, loss of the pod
-data = notify only (text `no pack current, MOT_BAT_CURR_MAX inactive`). Cockpit shows the virtual battery as the main one
+data = notify only (text `no pack current, current limit off`). Cockpit shows the virtual battery as the main one
 and BAT1/BAT2 as batteries 2 and 3 (owner OK).
 
 `PWR_BUDG` (pod 0.8.11) is logged in `PMAX` but not used: the limit is the fixed parameter.
@@ -232,30 +232,34 @@ This also means that a battery which is really low does not block arming by itse
   low-voltage failsafe (`check_failsafe_types` ignores a voltage that is not above 0), with the actions at 0 and also with
   `BATT_FS_LOW_ACT = 3` (Surface) and `BATT_FS_CRT_ACT = 2` (Disarm): only the "missing" warning, the vehicle stays armed in the same mode.
 - **A pod that reports a real low voltage does act once an action is non-zero.** SITL, pod alive at 39 V against `BATT_LOW_VOLT = 40`
-  and `BATT2_FS_LOW_ACT = 3`: `Battery 2 is low 39.00V used 321 mAh` and the mode leaves MANUAL for Surface (the SITL vehicle is already
+  and `BATT3_FS_LOW_ACT = 3` (BAT2): `Battery 3 is low 39.00V used 321 mAh` and the mode leaves MANUAL for Surface (the SITL vehicle is already
   at the surface, so Surface completes at once into ALT_HOLD). With `BATT_FS_CRT_ACT = 2` a critical voltage would disarm.
 - **Why they stay 0:** the voltage seen here is one pack, reported over the LAN; in single-pack mode it sags under load, and a Surface or
   Disarm action on it would take the ROV off the job it must finish; and, with no authentication on the LAN (see above), a forged low voltage
   would trigger it. Until the thresholds are verified at the bench the batteries only warn.
 - **The flag is latched.** After the "missing" warning fired, the `SYS_STATUS` battery health bit stays cleared (and
   `AP_BattMonitor::has_failsafed()` stays true) after the pod returns, until the failsafe state is reset. Reset it with
-  `MAV_CMD_BATTERY_RESET` (command 42651; `param1` = bitmask of the batteries, 1 = BATT, 2 = BATT2, 3 = both; `param2` = percentage, e.g. 100)
-  or by rebooting the autopilot. The battery data themselves resume at once and arming is not affected. SITL: the bit returns right after
-  `MAV_CMD_BATTERY_RESET` with `param1 = 2`.
+  `MAV_CMD_BATTERY_RESET` (command 42651; `param1` = bitmask of the batteries, 1 = BATT (virtual), 2 = BATT2 (BAT1), 4 = BATT3 (BAT2),
+  7 = all; `param2` = percentage, e.g. 100) or by rebooting the autopilot. The battery data themselves resume at once and arming is not
+  affected. SITL: the bit returns right after `MAV_CMD_BATTERY_RESET` with `param1 = 4` (BAT2 stopped and back).
 
 ## Test
 
-**22/11/2026 (virtual primary and limiter): the SITL script below still assumes BAT1 on `BATT_` and BAT2 on `BATT2_` and has
-NOT been updated or re-run.** Checked only on a host harness (Lua 5.4, stubbed bindings, real frames from pymavlink):
-mapping BAT1 -> monitor 1, BAT2 -> monitor 2; primary = most loaded pack with both pods, with one pod silent, with one
-current invalid; primary unhealthy with no valid current; foreign sysid ignored. To do before installing: update the SITL
-scenarios to the new mapping and add a limiter check (pack current above 28 A -> motor outputs reduced).
-
 `Tools/scripts/deepex_pod_battery_sitl.py` starts the SITL `ardusub` (`./waf sub`) with this script and emulates both pods (truncated MAVLink 2
-payloads, 41 of 54 bytes for `BATTERY_STATUS`). `--scenario functional` (default, 43 checks): `ARMING_SKIPCHK` before/after, arming, the batteries,
-the timeout, power-mode reporting (including rapid changes with exactly one log row and INFO text per observed change),
-foreign senders, the failsafe scenarios, the DataFlash log (`BAT` with `H`, `PWRM`, `PBAT`, `SCR`).
-`--scenario load`: the 3x test above, including an assertion that the emulator actually reaches its requested rate. Needs pymavlink.
+payloads, 41 of 54 bytes for `BATTERY_STATUS`). Mapping under test: instance 0 = virtual primary, 1 = BAT1, 2 = BAT2.
+
+- `--scenario functional` (default, 50 checks): `ARMING_SKIPCHK` before/after, arming, the batteries, the virtual primary (most loaded
+  pack, bus voltage, mAh sum, source switching, unhealthy with no valid current, still healthy with one pod silent), the timeout,
+  power-mode reporting (rapid changes: exactly one log row and INFO text per change), foreign senders, the failsafe scenarios on `BATT3_`,
+  the DataFlash log (`BAT` Inst 0/1/2 with `H`, `PWRM`, `PBAT`, `SCR`).
+- `--scenario limiter` (10 checks, `FRAME_CONFIG 1` as on Calypso): MANUAL, full forward stick. Packs under 28 A: full thrust; BAT1 or
+  BAT2 at 40 A: horizontal outputs driven down; current back: full thrust; both pods silent: limiter inactive, full thrust, warning text.
+  The emulated current does not follow the thrust, so the output goes to zero: this proves the coupling pod -> script -> limiter,
+  not the dynamics (`MOT_BAT_CURR_TC` is a bench item).
+- `--scenario load`: the 3x test above, including an assertion that the emulator actually reaches its requested rate. Needs pymavlink.
+
+Run 23/11/2026 on `./waf sub` (SITL) from this branch: functional 50/50, limiter 10/10, load 13/13.
+Status texts are kept within the 50 characters of `STATUSTEXT` (the earlier "MOT_BAT_CURR_MAX inactive" text was cut).
 
 MAVLink 2 truncation: the sender drops trailing zero bytes of the payload. In the `mavlink_message_t` that reaches Lua those bytes are
 already zeros (the C parser zero-fills the packet to the full message length, `mavlink_helpers.h`), and the script also zero-fills the

@@ -386,7 +386,7 @@ local function publish_virtual(t_ms)
     if not battery:handle_scripting(MONITOR_VIRTUAL, state) then
         if not warned_publish[MONITOR_VIRTUAL] then
             warned_publish[MONITOR_VIRTUAL] = true
-            gcs:send_text(MAV_SEVERITY.WARNING, string.format("%s: primary not scripting (set BATT_MONITOR 29)", SCRIPT_NAME))
+            gcs:send_text(MAV_SEVERITY.WARNING, string.format("%s: primary not scripting (BATT_MONITOR 29)", SCRIPT_NAME))
         end
     end
     if healthy ~= virtual.healthy then
@@ -394,7 +394,7 @@ local function publish_virtual(t_ms)
             if healthy then
                 gcs:send_text(MAV_SEVERITY.INFO, string.format("%s: pack current available, limiter input on", SCRIPT_NAME))
             else
-                gcs:send_text(MAV_SEVERITY.WARNING, string.format("%s: no pack current, MOT_BAT_CURR_MAX inactive", SCRIPT_NAME))
+                gcs:send_text(MAV_SEVERITY.WARNING, string.format("%s: no pack current, current limit off", SCRIPT_NAME))
             end
         end
         virtual.healthy = healthy
@@ -435,14 +435,14 @@ local function check_configuration()
         local name = MONITOR_PARAM[monitor]
         local value = param:get(name)
         if value ~= 29 then
-            gcs:send_text(MAV_SEVERITY.WARNING, string.format("%s: %s is %s, must be 29 (Scripting)",
+            gcs:send_text(MAV_SEVERITY.WARNING, string.format("%s: %s=%s, must be 29",
                           SCRIPT_NAME, name, tostring(value)))
             warned_config = true
         end
     end
     local imax = param:get("MOT_BAT_CURR_MAX")
     if imax == nil or imax <= 0 then
-        gcs:send_text(MAV_SEVERITY.WARNING, string.format("%s: MOT_BAT_CURR_MAX is %s: pack current limiter OFF",
+        gcs:send_text(MAV_SEVERITY.WARNING, string.format("%s: MOT_BAT_CURR_MAX=%s, limit off",
                       SCRIPT_NAME, tostring(imax)))
         warned_config = true
     else
