@@ -118,20 +118,20 @@ class VESCLogTest(unittest.TestCase):
         blocked = reason['BLOCK_DISARMED']
         accepted = tx['ACCEPTED']
         rejected = tx['REJECTED']
-        # (request, final, block, tx result, telemetry erpm, age)
+        # (request, final, block, tx result, telemetry erpm, age, fault in progress, last fault) - IF-0014 STATUS_5
         scenario = [
-            (8500, 8500, armed_ok, accepted, 8420, 12),
-            (-8500, -8500, armed_ok, accepted, -8390, 9),
-            (8500, 0, blocked, accepted, 40, 15),
-            (17000, 0, reason['BLOCK_TX_UNHEALTHY'], rejected, 0, 65535),
+            (8500, 8500, armed_ok, accepted, 8420, 12, 0, 0),
+            (-8500, -8500, armed_ok, accepted, -8390, 9, 0, 0),
+            (8500, 0, blocked, accepted, 40, 15, 2, 2),
+            (17000, 0, reason['BLOCK_TX_UNHEALTHY'], rejected, 0, 65535, 0, 2),
         ]
         records = []
-        for i, (req, fin, blk, res, rx, age) in enumerate(scenario):
-            records.append(('VESC', (1000000 + i * 100000, 2, 2, 1600, req, fin, blk, 3, res, i, rx, age)))
+        for i, (req, fin, blk, res, rx, age, flt, lflt) in enumerate(scenario):
+            records.append(('VESC', (1000000 + i * 100000, 2, 2, 1600, req, fin, blk, 3, res, i, rx, age, flt, lflt)))
         records.append(('VESS', (2000000, 4, 396, 80)))
         msgs = self.decode(records)
         self.assertEqual([m.get_type() for m in msgs], ['VESC'] * 4 + ['VESS'])
-        for m, (req, fin, blk, res, rx, age) in zip(msgs, scenario):
+        for m, (req, fin, blk, res, rx, age, flt, lflt) in zip(msgs, scenario):
             self.assertEqual(m.Mot, 2)
             self.assertEqual(m.Req, req)
             self.assertEqual(m.Cmd, fin)
@@ -139,6 +139,8 @@ class VESCLogTest(unittest.TestCase):
             self.assertEqual(m.Tx, res)
             self.assertEqual(m.Rx, rx)
             self.assertEqual(m.RxAge, age)
+            self.assertEqual(m.Flt, flt)
+            self.assertEqual(m.LFlt, lflt)
             # the logged final command is what is encoded in the SET_RPM frame
             self.assertEqual(struct.unpack('>i', set_rpm_payload(m.Cmd))[0], m.Cmd)
             if m.Blk != 0:
