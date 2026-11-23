@@ -628,6 +628,8 @@ void AP_VESC::send_commands()
 #if HAL_LOGGING_ENABLED
         log_command(motor, now_ms, request_pwm[motor], request_erpm[motor],
                     command_erpm[motor], block, tx);
+#else
+        (void)tx;
 #endif
     }
 
@@ -685,25 +687,25 @@ void AP_VESC::log_command(const uint8_t motor, const uint32_t now_ms, const uint
     const uint32_t status_ms = _controller_state[motor].last_status1_ms;
     const uint32_t age_ms = status_ms == 0 ? 65535U : MIN(65535U, now_ms - status_ms);
     // WriteStreaming drops the record instead of blocking when the buffer is full
-    logger->WriteStreaming("VESC",
-                           "TimeUS,Mot,ID,PWM,Req,Cmd,Blk,St,Tx,TxE,Rx,RxAge,Flt,LFlt",
-                           "s#-Yqq----q---",
-                           "F-------------",
-                           "QBBHiiHBBIiHBB",
-                           start_us,
-                           uint8_t(motor + 1),
-                           uint8_t(_controller_id[motor].get()),
-                           pwm,
-                           request_erpm,
-                           final_erpm,
-                           block,
-                           state,
-                           uint8_t(tx),
-                           _tx_error_count,
-                           _controller_state[motor].erpm,
-                           uint16_t(age_ms),
-                           _controller_state[motor].fault_code,
-                           _controller_state[motor].last_fault_code);
+    AP::logger().WriteStreaming("VESC",
+                                "TimeUS,Mot,ID,PWM,Req,Cmd,Blk,St,Tx,TxE,Rx,RxAge,Flt,LFlt",
+                                "s#-Yqq----q---",
+                                "F-------------",
+                                "QBBHiiHBBIiHBB",
+                                start_us,
+                                uint8_t(motor + 1),
+                                uint8_t(_controller_id[motor].get()),
+                                pwm,
+                                request_erpm,
+                                final_erpm,
+                                block,
+                                state,
+                                uint8_t(tx),
+                                _tx_error_count,
+                                _controller_state[motor].erpm,
+                                uint16_t(age_ms),
+                                _controller_state[motor].fault_code,
+                                _controller_state[motor].last_fault_code);
     _log_records++;
     _log_max_us = MAX(_log_max_us, uint32_t(AP_HAL::micros64() - start_us));
 }
@@ -724,8 +726,8 @@ void AP_VESC::log_summary(const uint32_t now_ms)
     if (logger == nullptr || !logger->logging_enabled()) {
         return;
     }
-    logger->WriteStreaming("VESS", "TimeUS,Rec,Sup,MaxUs", "s---", "F---", "QIII",
-                           AP_HAL::micros64(), _log_records, _log_suppressed, _log_max_us);
+    AP::logger().WriteStreaming("VESS", "TimeUS,Rec,Sup,MaxUs", "s---", "F---", "QIII",
+                                AP_HAL::micros64(), _log_records, _log_suppressed, _log_max_us);
 }
 #endif // HAL_LOGGING_ENABLED
 
