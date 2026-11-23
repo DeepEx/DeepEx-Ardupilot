@@ -26,8 +26,8 @@ import time
 
 os.environ["MAVLINK20"] = "1"  # must be set before pymavlink is imported
 
-from pymavlink import mavutil  # noqa: E402
 from pymavlink import DFReader  # noqa: E402
+from pymavlink import mavutil  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
