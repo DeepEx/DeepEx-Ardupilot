@@ -244,7 +244,7 @@ TEST(VESCProtocol, CommandSafetyConditions)
         true,   // interface available
         false,  // interface down
         true,   // TX healthy
-        true,   // all controllers ready
+        true,   // controller ready
     };
     EXPECT_TRUE(AP_VESC_Protocol::allow_nonzero_command(conditions));
     EXPECT_EQ(AP_VESC_Protocol::safe_command_erpm(-17000, conditions), -17000);
@@ -264,7 +264,7 @@ TEST(VESCProtocol, CommandSafetyConditions)
     conditions.interface_down = true;
     EXPECT_EQ(AP_VESC_Protocol::safe_command_erpm(17000, conditions), 0);
     conditions.interface_down = false;
-    conditions.all_controllers_ready = false;
+    conditions.controller_ready = false;
     EXPECT_EQ(AP_VESC_Protocol::safe_command_erpm(17000, conditions), 0);
 }
 
@@ -549,7 +549,7 @@ TEST(VESCProtocol, BlockReasons)
     conditions.tx_healthy = false;
     EXPECT_EQ(AP_VESC_Protocol::block_reasons(conditions), AP_VESC_Protocol::BLOCK_TX_UNHEALTHY);
     conditions.tx_healthy = true;
-    conditions.all_controllers_ready = false;
+    conditions.controller_ready = false;
     EXPECT_EQ(AP_VESC_Protocol::block_reasons(conditions), AP_VESC_Protocol::BLOCK_NOT_READY);
 
     // several reasons accumulate, and gating is consistent with the reasons
@@ -560,6 +560,28 @@ TEST(VESCProtocol, BlockReasons)
               AP_VESC_Protocol::BLOCK_TX_UNHEALTHY |
               AP_VESC_Protocol::BLOCK_NOT_READY);
     EXPECT_EQ(AP_VESC_Protocol::safe_command_erpm(5000, conditions), 0);
+}
+
+TEST(VESCProtocol, NotReadyControllerOnlyStopsItsOwnMotor)
+{
+    // DeepEx: a controller without telemetry or with an active fault must not
+    // stop the other motors (return home with a missing thruster)
+    const AP_VESC_Protocol::CommandConditions vehicle {
+        true, false, true, true, false, true, true,
+    };
+    const int32_t request[6] { 5000, -5000, 7000, -7000, 3000, -3000 };
+    const uint16_t ready = 0x003F & ~(1U << 4);   // motor 5 not ready
+    for (uint8_t m = 0; m < 6; m++) {
+        AP_VESC_Protocol::CommandConditions c = vehicle;
+        c.controller_ready = (ready & (1U << m)) != 0;
+        if (m == 4) {
+            EXPECT_EQ(AP_VESC_Protocol::safe_command_erpm(request[m], c), 0);
+            EXPECT_EQ(AP_VESC_Protocol::block_reasons(c), AP_VESC_Protocol::BLOCK_NOT_READY);
+        } else {
+            EXPECT_EQ(AP_VESC_Protocol::safe_command_erpm(request[m], c), request[m]);
+            EXPECT_EQ(AP_VESC_Protocol::block_reasons(c), 0);
+        }
+    }
 }
 
 TEST(VESCProtocol, LogRecordRateLimit)

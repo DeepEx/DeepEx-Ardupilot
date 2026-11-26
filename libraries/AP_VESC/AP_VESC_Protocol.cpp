@@ -214,7 +214,7 @@ bool allow_nonzero_command(const CommandConditions &conditions)
            conditions.interface_available &&
            !conditions.interface_down &&
            conditions.tx_healthy &&
-           conditions.all_controllers_ready;
+           conditions.controller_ready;
 }
 
 uint16_t block_reasons(const CommandConditions &conditions)
@@ -238,7 +238,7 @@ uint16_t block_reasons(const CommandConditions &conditions)
     if (!conditions.tx_healthy) {
         reasons |= BLOCK_TX_UNHEALTHY;
     }
-    if (!conditions.all_controllers_ready) {
+    if (!conditions.controller_ready) {
         reasons |= BLOCK_NOT_READY;
     }
     return reasons;
