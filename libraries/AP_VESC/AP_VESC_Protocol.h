@@ -141,7 +141,10 @@ struct CommandConditions {
     bool interface_available;
     bool interface_down;
     bool tx_healthy;
-    bool all_controllers_ready;
+    // readiness of the controller this command is for (telemetry fresh, no
+    // active fault). Evaluated per motor: a controller that is not ready only
+    // forces its own command to zero, never the other motors' commands.
+    bool controller_ready;
 };
 
 // Reasons for which a non-zero request is forced to zero before transmission.

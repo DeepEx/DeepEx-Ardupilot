@@ -233,6 +233,13 @@ const AP_Param::GroupInfo AP_VESC::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("EXT_TO", 27, AP_VESC, _extended_timeout_ms, 1000),
 
+    // @Param: ARMDEG
+    // @DisplayName: VESC arming with motors not ready
+    // @Description: 0: every selected motor must have fresh telemetry and no fault to arm. 1: arming is allowed while at least one selected motor is ready; the motors that are not ready are reported and receive zero commands. Once armed, a motor that loses telemetry or faults is always stopped on its own and the other motors keep running, whatever this value.
+    // @Values: 0:All motors required,1:Arm with motors missing
+    // @User: Advanced
+    AP_GROUPINFO("ARMDEG", 29, AP_VESC, _arm_degraded, 0),
+
     // @Param: ENG_TO
     // @DisplayName: VESC energy telemetry timeout
     // @Description: Maximum age of both STATUS_2 and STATUS_3 when reporting energy telemetry validity
@@ -547,9 +554,10 @@ void AP_VESC::send_commands()
         _can_iface != nullptr,
         _can_iface != nullptr && _can_iface->is_busoff(),
         tx_healthy,
-        ready == expected,
+        true,   // vehicle-level conditions; controller readiness is applied per motor below
     };
     const bool outputs_enabled = AP_VESC_Protocol::allow_nonzero_command(command_conditions);
+    update_degraded_motors(armed, expected, ready);
     _command_timeout_active = armed && !output_fresh;
 
     if (_last_armed && !armed) {
@@ -585,13 +593,17 @@ void AP_VESC::send_commands()
         _readiness_state = ReadinessState::READY;
     }
 
-    if (!outputs_enabled) {
-        memset(command_erpm, 0, sizeof(command_erpm));
+    uint16_t block[MAX_ESC] {};
+    for (uint8_t m = 0; m < MAX_ESC; m++) {
+        AP_VESC_Protocol::CommandConditions motor_conditions = command_conditions;
+        motor_conditions.controller_ready = (ready & (1U << m)) != 0;
+        // a controller without fresh telemetry or with an active fault gets
+        // zero; the other motors keep their commands (priority: return home)
+        if (!AP_VESC_Protocol::allow_nonzero_command(motor_conditions)) {
+            command_erpm[m] = 0;
+        }
+        block[m] = AP_VESC_Protocol::block_reasons(motor_conditions);
     }
-
-#if HAL_LOGGING_ENABLED
-    const uint16_t block = AP_VESC_Protocol::block_reasons(command_conditions);
-#endif
 
     // When disarmed, only address controllers which have recently announced
     // themselves. This avoids filling an unpowered CAN bus with failed TX.
@@ -627,9 +639,10 @@ void AP_VESC::send_commands()
         }
 #if HAL_LOGGING_ENABLED
         log_command(motor, now_ms, request_pwm[motor], request_erpm[motor],
-                    command_erpm[motor], block, tx);
+                    command_erpm[motor], block[motor], tx);
 #else
         (void)tx;
+        (void)block;
 #endif
     }
 
@@ -638,7 +651,7 @@ void AP_VESC::send_commands()
     for (uint8_t other = 0; other < MAX_ESC; other++) {
         if (other != uint8_t(motor) && (send_mask & (1U << other)) == 0 && request_erpm[other] != 0) {
             log_command(other, now_ms, request_pwm[other], request_erpm[other],
-                        command_erpm[other], block, AP_VESC_Protocol::TxResult::NOT_ADDRESSED);
+                        command_erpm[other], block[other], AP_VESC_Protocol::TxResult::NOT_ADDRESSED);
         }
     }
     log_summary(now_ms);
@@ -965,25 +978,62 @@ bool AP_VESC::pre_arm_check(char *reason, const uint8_t reason_len) const
         break;
     }
 
+    uint8_t ready_count = 0;
+    bool first_failure = true;
     for (uint8_t motor = 0; motor < MAX_ESC; motor++) {
         if (!motor_is_selected(motor)) {
             continue;
         }
         ControllerState state {};
-        if (!get_controller_state(motor, state) || !state.fast_telemetry_valid) {
+        const bool have_state = get_controller_state(motor, state);
+        if (have_state && state.command_ready) {
+            ready_count++;
+            continue;
+        }
+        if (!first_failure) {
+            continue;
+        }
+        first_failure = false;
+        if (!have_state || !state.fast_telemetry_valid) {
             hal.util->snprintf(reason, reason_len, "motor %u STATUS_1 stale", motor + 1);
-            return false;
-        }
-        if (!state.extended_telemetry_valid) {
+        } else if (!state.extended_telemetry_valid) {
             hal.util->snprintf(reason, reason_len, "motor %u STATUS_4/5 stale", motor + 1);
-            return false;
-        }
-        if (state.active_fault) {
+        } else {
             hal.util->snprintf(reason, reason_len, "motor %u fault %u", motor + 1, state.fault_code);
-            return false;
         }
     }
-    return true;
+    if (first_failure) {
+        return true;    // every selected motor is ready
+    }
+    // ARMDEG=1: arm with the ready motors, the others are reported once armed
+    return _arm_degraded.get() == 1 && ready_count > 0;
+}
+
+void AP_VESC::update_degraded_motors(const bool armed, const uint16_t expected, const uint16_t ready)
+{
+    const uint16_t degraded = armed ? (expected & ~ready) : 0;
+    const uint16_t changed = degraded ^ _degraded_mask;
+    if (changed == 0) {
+        return;
+    }
+    for (uint8_t motor = 0; motor < MAX_ESC; motor++) {
+        const uint16_t bit = 1U << motor;
+        if ((changed & bit) == 0) {
+            continue;
+        }
+        if ((degraded & bit) != 0) {
+            ControllerState state {};
+            if (get_controller_state(motor, state) && state.fast_telemetry_valid &&
+                state.extended_telemetry_valid && state.active_fault) {
+                GCS_SEND_TEXT(MAV_SEVERITY_CRITICAL, "VESC motor %u stopped: fault %u", motor + 1, state.fault_code);
+            } else {
+                GCS_SEND_TEXT(MAV_SEVERITY_CRITICAL, "VESC motor %u stopped: no telemetry", motor + 1);
+            }
+        } else if (armed) {
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "VESC motor %u back", motor + 1);
+        }
+    }
+    _degraded_mask = degraded;
 }
 
 #endif // AP_VESC_ENABLED

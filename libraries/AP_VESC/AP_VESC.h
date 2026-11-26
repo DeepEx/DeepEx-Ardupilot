@@ -80,6 +80,7 @@ private:
 
     void loop();
     void send_commands();
+    void update_degraded_motors(bool armed, uint16_t expected, uint16_t ready);
     void handle_frame(const AP_HAL::CANFrame &frame);
 
 #if HAL_LOGGING_ENABLED
@@ -120,6 +121,7 @@ private:
     bool _zero_flush_complete = true;
     uint32_t _disarm_flush_start_ms = 0;
     uint16_t _zero_flush_success_mask = 0;
+    uint16_t _degraded_mask = 0;   // armed motors stopped because their controller is not ready
     uint8_t _next_command_motor = 0;
     Mode _active_mode = Mode::PPM;
     AP_VESC_Protocol::Protocol _active_protocol = AP_VESC_Protocol::Protocol::STANDARD;
@@ -152,6 +154,7 @@ private:
     AP_Int8 _protocol;
     AP_Int16 _extended_timeout_ms;
     AP_Int16 _energy_timeout_ms;
+    AP_Int8 _arm_degraded;
 };
 
 #endif // AP_VESC_ENABLED
